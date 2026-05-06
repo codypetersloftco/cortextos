@@ -197,6 +197,14 @@ export class AgentProcess {
           // so we use Ctrl+D which exits cleanly on the first press.
           pty.write('\x04'); // Ctrl+D
           await sleep(3000);
+        } else if (this.config.runtime === 'codex') {
+          // Codex uses an exec-per-turn model — there is no persistent REPL
+          // between turns, so /exit + sleep below are no-ops on CodexPTY
+          // (write() just buffers). The only meaningful stop step is
+          // pty.kill(), which terminates the in-flight `codex exec` (if any)
+          // and flips _alive=false. Skipping the 6s Claude-REPL dance makes
+          // `bus hard-restart` feel responsive instead of appearing to do
+          // nothing for several seconds.
         } else {
           // BUG-032 fix: use CRLF (not lone CR) so Claude Code's REPL actually
           // recognizes the /exit line as a complete command, AND wait long
