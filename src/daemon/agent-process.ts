@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import { homedir } from 'os';
+import { execFileSync } from 'child_process';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
 import { CodexPTY } from '../pty/codex-pty.js';
@@ -473,6 +474,12 @@ export class AgentProcess {
     const launchDir = this.config.working_directory || this.env.agentDir;
     if (!launchDir) return false;
 
+    // Codex exec mode stores thread metadata in ~/.codex/state_5.sqlite.
+    // Resume should be cwd-filtered to match `codex exec resume --last`.
+    if (this.config.runtime === 'codex') {
+      return this.codexSessionExists(launchDir);
+    }
+
     // Claude projects dir uses the absolute path with all separators replaced by dashes
     // e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss (leading sep becomes -)
     // Use homedir() for cross-platform compatibility (HOME is not set on Windows).
@@ -486,6 +493,23 @@ export class AgentProcess {
     try {
       const files = require('fs').readdirSync(convDir);
       return files.some((f: string) => f.endsWith('.jsonl'));
+    } catch {
+      return false;
+    }
+  }
+
+  private codexSessionExists(cwd: string): boolean {
+    const dbPath = join(homedir(), '.codex', 'state_5.sqlite');
+    if (!existsSync(dbPath)) return false;
+
+    try {
+      const escapedCwd = cwd.replace(/'/g, "''");
+      const query = `SELECT id FROM threads WHERE cwd = '${escapedCwd}' AND archived = 0 ORDER BY updated_at DESC LIMIT 1;`;
+      const result = execFileSync('sqlite3', [dbPath, query], {
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+      return result.length > 0;
     } catch {
       return false;
     }
