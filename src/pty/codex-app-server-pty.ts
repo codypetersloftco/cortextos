@@ -5,6 +5,7 @@ import { randomBytes } from 'crypto';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
+import { cacheLastSent, logOutboundMessage } from '../telegram/logging.js';
 import { ensureDir } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { logEvent } from '../bus/event.js';
@@ -465,12 +466,33 @@ export class CodexAppServerPTY {
    * Local-command reply: writes to the agent log AND mirrors back to Telegram.
    * Local commands (`/goal`, `$skill` errors) are handled inside the adapter
    * without an LLM turn, so the user only sees a response if we send it.
+   *
+   * Persists outbound to the same JSONL + last-sent cache that
+   * `cortextos bus send-telegram` uses (see cli/bus.ts:1001-1004), so
+   * downstream consumers (E2E harness, dashboard activity, context
+   * injection) see adapter-originated replies the same as bus-originated
+   * ones. Direct TelegramAPI.sendMessage path skipped that persistence.
    */
   private replyLocal(text: string): void {
     this._outputBuffer.push(text + '\n');
-    if (this._telegramApi && this._chatId) {
-      this._telegramApi.sendMessage(this._chatId, text, undefined, { parseMode: null }).catch(() => {});
-    }
+    if (!this._telegramApi || !this._chatId) return;
+    const chatId = this._chatId;
+    const ctxRoot = this._env.ctxRoot;
+    const agentName = this._env.agentName;
+    this._telegramApi
+      .sendMessage(chatId, text, undefined, { parseMode: null })
+      .then((result: { result?: { message_id?: number } } | undefined) => {
+        const messageId = result?.result?.message_id ?? 0;
+        try {
+          logOutboundMessage(ctxRoot, agentName, chatId, text, messageId, { parseMode: 'none' });
+          cacheLastSent(ctxRoot, agentName, chatId, text);
+        } catch (err) {
+          this._outputBuffer.push(`[goal] outbound-log-failed: ${err}\n`);
+        }
+      })
+      .catch((err: Error) => {
+        this._outputBuffer.push(`[goal] telegram-send-failed: ${err.message}\n`);
+      });
   }
 
   private async setGoal(objective: string): Promise<void> {

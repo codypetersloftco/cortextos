@@ -59,6 +59,14 @@ vi.mock('../../../src/bus/event.js', () => ({
   logEvent: logEventMock,
 }));
 
+const logOutboundMessageMock = vi.fn();
+const cacheLastSentMock = vi.fn();
+
+vi.mock('../../../src/telegram/logging.js', () => ({
+  logOutboundMessage: logOutboundMessageMock,
+  cacheLastSent: cacheLastSentMock,
+}));
+
 const { CodexAppServerPTY } = await import('../../../src/pty/codex-app-server-pty.js');
 
 const mockEnv = {
@@ -81,6 +89,8 @@ beforeEach(() => {
   closeMock.mockReset();
   respondErrorMock.mockReset();
   logEventMock.mockReset();
+  logOutboundMessageMock.mockReset();
+  cacheLastSentMock.mockReset();
   messageHandler = null;
 });
 
@@ -219,6 +229,32 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     pty.write('\r');
     await Promise.resolve();
     expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] cleared', undefined, { parseMode: null });
+  });
+
+  it('persists /goal replies to outbound log + last-sent cache (harness-visible)', async () => {
+    requestMock.mockResolvedValue({ result: { goal: { status: 'active', objective: 'Land it' } } });
+    const pty = makeReadyPty();
+    const sendMessage = vi.fn().mockResolvedValue({ result: { message_id: 4242 } });
+    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
+    pty.write('/goal');
+    pty.write('\r');
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(logOutboundMessageMock).toHaveBeenCalledWith(
+      '/tmp/ctx',
+      'codex-app-agent',
+      '7940429114',
+      '[goal] active: Land it',
+      4242,
+      { parseMode: 'none' },
+    );
+    expect(cacheLastSentMock).toHaveBeenCalledWith(
+      '/tmp/ctx',
+      'codex-app-agent',
+      '7940429114',
+      '[goal] active: Land it',
+    );
   });
 
   it('mirrors unknown $skill error to Telegram when handle is bound', async () => {
