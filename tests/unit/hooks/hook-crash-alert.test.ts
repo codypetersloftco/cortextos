@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -8,7 +8,7 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, checkAndRecordSession } from '../../../src/hooks/hook-crash-alert';
 
 describe('readMaxCrashesPerDay', () => {
   let tmp: string;
@@ -143,5 +143,45 @@ describe('notifyAgents', () => {
     })).not.toThrow();
     // Second recipient still attempted
     expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('checkAndRecordSession', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-session-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('first sighting of a session_id is not a duplicate', () => {
+    expect(checkAndRecordSession(tmp, 'sess-aaa').duplicate).toBe(false);
+  });
+
+  it('second firing for the SAME session_id is a duplicate', () => {
+    // First firing — the dying PTY's SessionEnd.
+    expect(checkAndRecordSession(tmp, 'sess-aaa').duplicate).toBe(false);
+    // Second firing — the next PTY's fresh-launch cleanup, same session-end.
+    expect(checkAndRecordSession(tmp, 'sess-aaa').duplicate).toBe(true);
+  });
+
+  it('a new session_id after one was recorded is not a duplicate (real crash path)', () => {
+    checkAndRecordSession(tmp, 'sess-aaa');
+    // A genuine later crash is a different session — must always be processed.
+    expect(checkAndRecordSession(tmp, 'sess-bbb').duplicate).toBe(false);
+  });
+
+  it('empty session_id is never a duplicate (cannot dedup → FP-safe fall-through)', () => {
+    expect(checkAndRecordSession(tmp, '').duplicate).toBe(false);
+    // An empty id must not be recorded, so it cannot later swallow a real end.
+    expect(checkAndRecordSession(tmp, '').duplicate).toBe(false);
+  });
+
+  it('records the session_id to .crash_last_session for cross-process dedup', () => {
+    checkAndRecordSession(tmp, 'sess-ccc');
+    expect(readFileSync(join(tmp, '.crash_last_session'), 'utf-8').trim()).toBe('sess-ccc');
   });
 });

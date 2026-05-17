@@ -148,6 +148,66 @@ function shouldSuppressDedup(stateDir: string, endType: string): boolean {
   return false;
 }
 
+/**
+ * Read the hook's stdin JSON payload. Claude Code pipes a JSON object to
+ * SessionEnd hooks containing `session_id` (the ending session's id) plus
+ * other event fields. Mirrors the stdin-read in hook-context-status.ts.
+ * Returns {} on any failure — callers treat a missing session_id as
+ * "cannot dedup" and fall through to normal processing (FP-safe).
+ */
+async function readHookInput(): Promise<{ session_id?: string }> {
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve) => {
+    process.stdin.on('data', (chunk: Buffer) => chunks.push(chunk));
+    process.stdin.on('end', resolve);
+    process.stdin.on('error', resolve);
+    setTimeout(resolve, 1500); // don't block forever
+  });
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Dedup a SessionEnd hook firing by session_id.
+ *
+ * A single restart fires the SessionEnd hook TWICE for the SAME logical
+ * session-end (~13-17s apart): once from the dying PTY, once from the next
+ * PTY's fresh-launch cleanup. crashes.log writes one line per hook *firing*,
+ * so the second firing — which finds no marker (the first consumed it) — is
+ * logged as a false `type=crash reason=none`.
+ *
+ * session_id is a hard identity signal: both firings carry the ended
+ * session's id; a real crash carries a distinct id. If a SessionEnd for this
+ * exact session_id was already processed, this firing is the duplicate and
+ * the caller should no-op entirely.
+ *
+ * Records the session_id on a first sighting BEFORE the caller does any
+ * further work, so a mid-processing failure still leaves the duplicate
+ * firing suppressible. An empty session_id (older Claude Code, or hook
+ * invoked without stdin) returns duplicate=false — we cannot dedup, so we
+ * fall through to normal processing: a possible FP beats suppressing a
+ * possible real crash.
+ */
+export function checkAndRecordSession(
+  stateDir: string,
+  sessionId: string,
+): { duplicate: boolean } {
+  if (!sessionId) return { duplicate: false };
+  const lastSessionFile = join(stateDir, '.crash_last_session');
+  let lastSession = '';
+  try {
+    lastSession = readFileSync(lastSessionFile, 'utf-8').trim();
+  } catch { /* no prior session recorded */ }
+  if (lastSession === sessionId) return { duplicate: true };
+  try {
+    writeFileSync(lastSessionFile, sessionId, 'utf-8');
+  } catch { /* ignore — worst case the duplicate firing is not suppressed */ }
+  return { duplicate: false };
+}
+
 async function main(): Promise<void> {
   const agentName = process.env.CTX_AGENT_NAME;
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
@@ -159,6 +219,15 @@ async function main(): Promise<void> {
 
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(logDir, { recursive: true });
+
+  // Dedup by session_id — see checkAndRecordSession. The duplicate firing of
+  // a restart no-ops here: no crashes.log line, no alert, no crash-count
+  // increment. A real crash always carries a new id and is always processed.
+  const hookInput = await readHookInput();
+  const sessionId = typeof hookInput.session_id === 'string' ? hookInput.session_id : '';
+  if (checkAndRecordSession(stateDir, sessionId).duplicate) {
+    return;
+  }
 
   // Determine end type from state markers (written by other parts of the system
   // before the Claude Code session exits).
@@ -235,8 +304,11 @@ async function main(): Promise<void> {
   } catch { /* ignore */ }
 
   // Always log to crashes.log — we want visibility even when alerts are muted.
+  // session_id is recorded so the session_id dedup above is auditable after
+  // the fact: a duplicate-firing FP, if one ever slips through, is provable
+  // by two crashes.log lines sharing a session value.
   const timestamp = new Date().toISOString();
-  const logLine = `${timestamp} type=${endType} reason=${reason || 'none'} last_task=${lastTask}\n`;
+  const logLine = `${timestamp} type=${endType} reason=${reason || 'none'} session=${sessionId || 'unknown'} last_task=${lastTask}\n`;
   try {
     appendFileSync(join(logDir, 'crashes.log'), logLine);
   } catch { /* ignore */ }
