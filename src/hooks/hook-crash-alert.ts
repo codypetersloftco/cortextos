@@ -149,11 +149,28 @@ function shouldSuppressDedup(stateDir: string, endType: string): boolean {
 }
 
 /**
+ * A restart marker is valid for the hook only while younger than this. A
+ * single restart fires the SessionEnd hook TWICE (~13-22s apart); the marker
+ * must survive both firings. The daemon's first-post-restart heartbeat is the
+ * primary clear (see updateHeartbeat in src/bus/heartbeat.ts). This TTL is
+ * only the BACKSTOP for a failed start that never heartbeats: a marker older
+ * than the TTL is treated as stale, ignored, and lazy-unlinked, so it cannot
+ * misclassify a genuine crash arbitrarily far in the future.
+ *
+ * Sized generously on a deliberate cost asymmetry: a TTL too tight re-exposes
+ * the exact false-positive bug (it would ignore the marker at a slow
+ * firing#2); a TTL too generous only widens the bounded failed-start
+ * false-negative window — which the heartbeat-staleness monitor catches as a
+ * secondary path anyway. 300s clears any plausible firing#2 delay.
+ */
+const MARKER_TTL_MS = 300_000; // 5 minutes
+
+/**
  * Read the hook's stdin JSON payload. Claude Code pipes a JSON object to
  * SessionEnd hooks containing `session_id` (the ending session's id) plus
  * other event fields. Mirrors the stdin-read in hook-context-status.ts.
- * Returns {} on any failure — callers treat a missing session_id as
- * "cannot dedup" and fall through to normal processing (FP-safe).
+ * Returns {} on any failure. The session_id is recorded in crashes.log for
+ * audit; it is not used for classification.
  */
 async function readHookInput(): Promise<{ session_id?: string }> {
   const chunks: Buffer[] = [];
@@ -171,41 +188,49 @@ async function readHookInput(): Promise<{ session_id?: string }> {
 }
 
 /**
- * Dedup a SessionEnd hook firing by session_id.
+ * Classify a SessionEnd from the state markers, returning the marker-derived
+ * end type + reason — WITHOUT consuming the marker.
  *
- * A single restart fires the SessionEnd hook TWICE for the SAME logical
- * session-end (~13-17s apart): once from the dying PTY, once from the next
- * PTY's fresh-launch cleanup. crashes.log writes one line per hook *firing*,
- * so the second firing — which finds no marker (the first consumed it) — is
- * logged as a false `type=crash reason=none`.
+ * Why no-consume: a single restart fires the SessionEnd hook TWICE for one
+ * logical session-end (~13-22s apart) — once from the dying PTY, once from
+ * the next PTY's fresh-launch cleanup. Every restart path writes exactly ONE
+ * hook-recognized marker. The previous code unlinked the marker on the first
+ * firing, so the second firing found nothing and was logged as a false
+ * `type=crash reason=none` — the FP pairs in crashes.log. Leaving the marker
+ * in place lets BOTH firings classify correctly. The marker is cleared by the
+ * daemon's first-post-restart heartbeat (the successor session is genuinely
+ * up by then), with the TTL above as the failed-start backstop.
  *
- * session_id is a hard identity signal: both firings carry the ended
- * session's id; a real crash carries a distinct id. If a SessionEnd for this
- * exact session_id was already processed, this firing is the duplicate and
- * the caller should no-op entirely.
+ * A marker older than MARKER_TTL_MS is treated as stale: ignored (so it
+ * cannot misclassify a later genuine crash) and lazy-unlinked here.
  *
- * Records the session_id on a first sighting BEFORE the caller does any
- * further work, so a mid-processing failure still leaves the duplicate
- * firing suppressible. An empty session_id (older Claude Code, or hook
- * invoked without stdin) returns duplicate=false — we cannot dedup, so we
- * fall through to normal processing: a possible FP beats suppressing a
- * possible real crash.
+ * Returns { endType: 'crash' } when no fresh marker is present.
  */
-export function checkAndRecordSession(
+export function classifyFromMarkers(
   stateDir: string,
-  sessionId: string,
-): { duplicate: boolean } {
-  if (!sessionId) return { duplicate: false };
-  const lastSessionFile = join(stateDir, '.crash_last_session');
-  let lastSession = '';
-  try {
-    lastSession = readFileSync(lastSessionFile, 'utf-8').trim();
-  } catch { /* no prior session recorded */ }
-  if (lastSession === sessionId) return { duplicate: true };
-  try {
-    writeFileSync(lastSessionFile, sessionId, 'utf-8');
-  } catch { /* ignore — worst case the duplicate firing is not suppressed */ }
-  return { duplicate: false };
+  markers: { file: string; type: string }[],
+  nowMs: number = Date.now(),
+): { endType: string; reason: string } {
+  for (const marker of markers) {
+    const markerPath = join(stateDir, marker.file);
+    if (!existsSync(markerPath)) continue;
+    let ageMs = 0;
+    try {
+      ageMs = nowMs - statSync(markerPath).mtimeMs;
+    } catch { /* unreadable mtime — treat as fresh, fall through to classify */ }
+    if (ageMs > MARKER_TTL_MS) {
+      // Stale: the first-heartbeat clear evidently never fired (failed
+      // start). Do not classify from it — lazy-unlink and keep looking.
+      try { unlinkSync(markerPath); } catch { /* ignore */ }
+      continue;
+    }
+    let reason = '';
+    try {
+      reason = readFileSync(markerPath, 'utf-8').trim();
+    } catch { /* ignore */ }
+    return { endType: marker.type, reason };
+  }
+  return { endType: 'crash', reason: '' };
 }
 
 async function main(): Promise<void> {
@@ -220,20 +245,16 @@ async function main(): Promise<void> {
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(logDir, { recursive: true });
 
-  // Dedup by session_id — see checkAndRecordSession. The duplicate firing of
-  // a restart no-ops here: no crashes.log line, no alert, no crash-count
-  // increment. A real crash always carries a new id and is always processed.
+  // session_id is recorded in crashes.log for audit only — not used to
+  // classify. (An earlier iteration deduped firings by session_id; that was
+  // wrong — the two firings of one restart carry DIFFERENT session_ids, one
+  // real session + one ephemeral. The fix is marker-handling, not id-dedup.)
   const hookInput = await readHookInput();
   const sessionId = typeof hookInput.session_id === 'string' ? hookInput.session_id : '';
-  if (checkAndRecordSession(stateDir, sessionId).duplicate) {
-    return;
-  }
 
-  // Determine end type from state markers (written by other parts of the system
-  // before the Claude Code session exits).
-  let endType = 'crash';
-  let reason = '';
-
+  // Determine end type from state markers (written by other parts of the
+  // system before the Claude Code session exits). Markers are NOT consumed
+  // here — see classifyFromMarkers for why (restart fires this hook twice).
   const markers = [
     { file: '.restart-planned', type: 'planned-restart' },
     { file: '.session-refresh', type: 'session-refresh' },
@@ -247,17 +268,9 @@ async function main(): Promise<void> {
     { file: '.daemon-stop', type: 'daemon-stop' },
   ];
 
-  for (const marker of markers) {
-    const markerPath = join(stateDir, marker.file);
-    if (existsSync(markerPath)) {
-      endType = marker.type;
-      try {
-        reason = readFileSync(markerPath, 'utf-8').trim();
-        unlinkSync(markerPath);
-      } catch { /* ignore */ }
-      break;
-    }
-  }
+  const classified = classifyFromMarkers(stateDir, markers);
+  let endType = classified.endType;
+  let reason = classified.reason;
 
   // If no marker matched but the stdout tail shows a rate-limit signature,
   // reclassify as rate-limited. Prevents the 30-minute 🚨 CRASH buzz storm

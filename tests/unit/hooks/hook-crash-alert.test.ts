@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -8,7 +8,8 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents, checkAndRecordSession } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, classifyFromMarkers } from '../../../src/hooks/hook-crash-alert';
+import { clearEndMarkers } from '../../../src/bus/heartbeat';
 
 describe('readMaxCrashesPerDay', () => {
   let tmp: string;
@@ -146,42 +147,84 @@ describe('notifyAgents', () => {
   });
 });
 
-describe('checkAndRecordSession', () => {
+describe('classifyFromMarkers', () => {
   let tmp: string;
+  const MARKERS = [
+    { file: '.restart-planned', type: 'planned-restart' },
+    { file: '.session-refresh', type: 'session-refresh' },
+    { file: '.user-restart', type: 'user-restart' },
+    { file: '.user-stop', type: 'user-stop' },
+  ];
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'crashalert-session-'));
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-markers-'));
   });
 
   afterEach(() => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('first sighting of a session_id is not a duplicate', () => {
-    expect(checkAndRecordSession(tmp, 'sess-aaa').duplicate).toBe(false);
+  it('no marker present → endType crash', () => {
+    expect(classifyFromMarkers(tmp, MARKERS).endType).toBe('crash');
   });
 
-  it('second firing for the SAME session_id is a duplicate', () => {
-    // First firing — the dying PTY's SessionEnd.
-    expect(checkAndRecordSession(tmp, 'sess-aaa').duplicate).toBe(false);
-    // Second firing — the next PTY's fresh-launch cleanup, same session-end.
-    expect(checkAndRecordSession(tmp, 'sess-aaa').duplicate).toBe(true);
+  it('fresh marker → classified by type, with its reason', () => {
+    writeFileSync(join(tmp, '.restart-planned'), 'planned reboot', 'utf-8');
+    const r = classifyFromMarkers(tmp, MARKERS);
+    expect(r.endType).toBe('planned-restart');
+    expect(r.reason).toBe('planned reboot');
   });
 
-  it('a new session_id after one was recorded is not a duplicate (real crash path)', () => {
-    checkAndRecordSession(tmp, 'sess-aaa');
-    // A genuine later crash is a different session — must always be processed.
-    expect(checkAndRecordSession(tmp, 'sess-bbb').duplicate).toBe(false);
+  it('does NOT consume the marker — both firings of a restart see it', () => {
+    writeFileSync(join(tmp, '.session-refresh'), 'rollover', 'utf-8');
+    // Firing #1 — the dying PTY's SessionEnd.
+    expect(classifyFromMarkers(tmp, MARKERS).endType).toBe('session-refresh');
+    // Firing #2 — the next PTY's fresh-launch cleanup. Marker must still be
+    // there: this is the FP that the old unlink-on-read code produced.
+    expect(classifyFromMarkers(tmp, MARKERS).endType).toBe('session-refresh');
+    expect(existsSync(join(tmp, '.session-refresh'))).toBe(true);
   });
 
-  it('empty session_id is never a duplicate (cannot dedup → FP-safe fall-through)', () => {
-    expect(checkAndRecordSession(tmp, '').duplicate).toBe(false);
-    // An empty id must not be recorded, so it cannot later swallow a real end.
-    expect(checkAndRecordSession(tmp, '').duplicate).toBe(false);
+  it('marker older than the TTL → treated as stale: ignored AND lazy-unlinked', () => {
+    const markerPath = join(tmp, '.restart-planned');
+    writeFileSync(markerPath, 'stale planned restart', 'utf-8');
+    // Simulate a marker whose first-heartbeat clear never fired (failed
+    // start): classify with a "now" well past the 5-minute TTL.
+    const farFuture = Date.now() + 10 * 60 * 1000;
+    const r = classifyFromMarkers(tmp, MARKERS, farFuture);
+    expect(r.endType).toBe('crash'); // stale marker must NOT mask a real crash
+    expect(existsSync(markerPath)).toBe(false); // lazy-unlinked
   });
 
-  it('records the session_id to .crash_last_session for cross-process dedup', () => {
-    checkAndRecordSession(tmp, 'sess-ccc');
-    expect(readFileSync(join(tmp, '.crash_last_session'), 'utf-8').trim()).toBe('sess-ccc');
+  it('first matching marker wins (precedence order preserved)', () => {
+    writeFileSync(join(tmp, '.restart-planned'), 'planned', 'utf-8');
+    writeFileSync(join(tmp, '.user-stop'), 'stopped', 'utf-8');
+    expect(classifyFromMarkers(tmp, MARKERS).endType).toBe('planned-restart');
+  });
+});
+
+describe('clearEndMarkers (via heartbeat)', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-clear-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('a heartbeat removes every pending end-type marker', () => {
+    for (const f of ['.restart-planned', '.session-refresh', '.user-restart', '.user-stop', '.daemon-stop']) {
+      writeFileSync(join(tmp, f), 'x', 'utf-8');
+    }
+    clearEndMarkers(tmp);
+    for (const f of ['.restart-planned', '.session-refresh', '.user-restart', '.user-stop', '.daemon-stop']) {
+      expect(existsSync(join(tmp, f))).toBe(false);
+    }
+  });
+
+  it('is a no-op when no markers are present', () => {
+    expect(() => clearEndMarkers(tmp)).not.toThrow();
   });
 });

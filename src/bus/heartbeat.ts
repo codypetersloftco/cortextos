@@ -1,7 +1,37 @@
-import { readdirSync, readFileSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { Heartbeat, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+
+/**
+ * SessionEnd-hook end-type markers (see src/hooks/hook-crash-alert.ts). A
+ * restart writes one of these; the crash-alert hook reads it WITHOUT consuming
+ * it, because one restart fires the hook twice and both firings must classify
+ * from the same marker. clearEndMarkers is the marker's primary cleanup: an
+ * agent that is updating its heartbeat is genuinely alive in its post-restart
+ * session — any pending end-marker is therefore stale and is removed here, so
+ * it cannot misclassify a later genuine crash. The hook's own TTL is only the
+ * backstop for a start that fails before ever heartbeating.
+ */
+const END_TYPE_MARKERS = [
+  '.restart-planned',
+  '.session-refresh',
+  '.user-restart',
+  '.user-disable',
+  '.user-stop',
+  '.daemon-crashed',
+  '.daemon-stop',
+];
+
+/** Remove any SessionEnd-hook end-type markers from an agent's state dir. */
+export function clearEndMarkers(stateDir: string): void {
+  for (const file of END_TYPE_MARKERS) {
+    const p = join(stateDir, file);
+    if (existsSync(p)) {
+      try { unlinkSync(p); } catch { /* ignore — best-effort cleanup */ }
+    }
+  }
+}
 
 /**
  * Update heartbeat for the current agent.
@@ -34,6 +64,12 @@ export function updateHeartbeat(
     join(paths.stateDir, 'heartbeat.json'),
     JSON.stringify(heartbeat),
   );
+
+  // The agent is alive in its (post-restart) session — clear any stale
+  // SessionEnd markers so the crash-alert hook cannot misclassify a later
+  // genuine crash as a planned restart. This is the primary marker cleanup;
+  // the hook's TTL is the failed-start backstop.
+  clearEndMarkers(paths.stateDir);
 }
 
 /**
