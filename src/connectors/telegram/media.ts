@@ -117,8 +117,33 @@ export async function processMediaMessage(
     const filePath = fileResponse?.result?.file_path;
     if (!filePath) return null;
 
-    const localFile = path.join(downloadDir, fileName);
     const data = await api.downloadFile(filePath);
+
+    // Track 2 mime-mismatch fix: documents can be ANY file type and
+    // the user-supplied `file_name` extension is untrusted. If the
+    // bytes are an image, the extension must match the bytes —
+    // otherwise claude-code's auto-attach mis-labels the mime and
+    // Anthropic returns 400 image/<x> not supported, wedging the
+    // agent. See pr-reviews/track2-mime-mismatch/.
+    //
+    // Three-way switch:
+    //   1. Not an image (sniff='unknown') → leave filename as-is
+    //      (PDFs, code files, etc. work as before).
+    //   2. Image format Anthropic supports → rename to canonical ext
+    //      (png/jpg/gif/webp) so claude-code labels correctly.
+    //   3. Image format Anthropic does NOT support (HEIC) → append
+    //      `.unsupported-image` so claude-code's auto-attach skips it
+    //      (no crash) and the agent surfaces the issue to the user.
+    const sniffed = sniffImageMime(data);
+    let safeFileName = fileName;
+    if (isAnthropicSupportedImage(sniffed)) {
+      const canonical = canonicalExtFor(sniffed);
+      const base = fileName.replace(/\.[^.]+$/, '');
+      safeFileName = `${base}.${canonical}`;
+    } else if (sniffed === 'heic') {
+      safeFileName = `${fileName}.${canonicalExtFor(sniffed)}`;
+    }
+    const localFile = path.join(downloadDir, safeFileName);
     fs.writeFileSync(localFile, data);
 
     return {
@@ -128,7 +153,7 @@ export async function processMediaMessage(
       text: caption,
       date,
       file_path: localFile,
-      file_name: fileName,
+      file_name: safeFileName,
     };
   }
 
