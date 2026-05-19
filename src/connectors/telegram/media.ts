@@ -7,6 +7,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { TelegramAPI } from './api.js';
 import { transcribeVoice } from './transcribe.js';
+import {
+  sniffImageMime,
+  canonicalExtFor,
+  isAnthropicSupportedImage,
+} from './mime-sniff.js';
 import { TelegramMessage } from '../../types/index.js';
 import { ensureDir } from '../../utils/atomic.js';
 
@@ -77,9 +82,22 @@ export async function processMediaMessage(
     const nameWithoutExt = baseName.replace(/\.[^.]+$/, '');
     const suffix = nameWithoutExt.slice(-11);
     const dateStr = formatDate(date);
-    const localFile = path.join(downloadDir, `${dateStr}_${suffix}.jpg`);
 
     const data = await api.downloadFile(filePath);
+
+    // Defensive sniff: Telegram is spec'd to re-encode photo-type
+    // uploads to JPEG, but the Track 2 investigation flagged that
+    // some client/server combos may leak originals. Sniff the actual
+    // bytes and use the canonical extension — falls back to .jpg if
+    // sniff returns 'unknown' (preserves prior behavior + matches
+    // Telegram's documented contract).
+    const sniffed = sniffImageMime(data);
+    const ext = isAnthropicSupportedImage(sniffed)
+      ? canonicalExtFor(sniffed)
+      : sniffed === 'heic'
+        ? canonicalExtFor(sniffed)  // 'unsupported-image' suffix
+        : 'jpg';
+    const localFile = path.join(downloadDir, `${dateStr}_${suffix}.${ext}`);
     fs.writeFileSync(localFile, data);
 
     return {
