@@ -509,7 +509,7 @@ export function submitCommunityItem(
 
   // --contribute: create branch, commit, push to origin, open PR against upstream
   if (options.contribute) {
-    const execOpts = { cwd: frameworkRoot, encoding: 'utf-8' as const, timeout: 60000 };
+    const execOpts = { cwd: frameworkRoot, encoding: 'utf-8' as const, timeout: 60000, windowsHide: true };
 
     try {
       // Verify upstream remote exists

@@ -182,6 +182,7 @@ export function queryKnowledgeBase(
         encoding: 'utf-8',
         timeout: 30000,
         env,
+        windowsHide: true,
       });
     } catch {
       return null;
@@ -321,6 +322,7 @@ export function ingestKnowledgeBase(
     timeout: ingestTimeoutMs,
     env,
     stdio: 'inherit',
+    windowsHide: true,
   });
 
   console.log(`\nIngest complete → collection: ${collection}`);

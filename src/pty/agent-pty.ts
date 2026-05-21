@@ -149,6 +149,7 @@ export class AgentPTY {
       rows: 50,
       cwd,
       env: ptyEnv,
+      ...(process.platform === 'win32' ? { useConpty: true } : {}),
     });
 
     this._alive = true;

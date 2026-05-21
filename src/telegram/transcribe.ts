@@ -116,6 +116,7 @@ function runProcess(
     try {
       proc = spawn(bin, args, {
         stdio: ['ignore', capture ? 'pipe' : 'ignore', 'ignore'],
+        windowsHide: true,
       });
     } catch (err) {
       return settle({ ok: false, reason: `spawn-error: ${(err as Error).message}` });

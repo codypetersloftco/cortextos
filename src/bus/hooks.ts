@@ -309,7 +309,7 @@ function emitHookBusEvent(name: HookEmitName, meta: Record<string, unknown>): vo
     execFile(
       'cortextos',
       ['bus', 'log-event', 'action', name, 'info', '--meta', JSON.stringify(meta)],
-      { timeout: 5_000 },
+      { timeout: 5_000, windowsHide: true },
       () => { /* fire-and-forget */ },
     );
   } catch {

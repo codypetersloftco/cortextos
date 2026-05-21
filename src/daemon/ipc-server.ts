@@ -1,6 +1,6 @@
 import { createServer, Server, Socket } from 'net';
 import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
-import { join, resolve as pathResolve } from 'path';
+import { join, resolve as pathResolve, sep } from 'path';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
@@ -651,9 +651,15 @@ export class IPCServer {
             const resolvedDir = pathResolve(d.dir);
             const ctxRoot = process.env.CTX_ROOT ? pathResolve(process.env.CTX_ROOT) : '';
             const cwd = pathResolve(process.cwd());
-            const underCtxRoot = ctxRoot && (resolvedDir === ctxRoot || resolvedDir.startsWith(ctxRoot + '/'));
-            const underCwd = resolvedDir === cwd || resolvedDir.startsWith(cwd + '/');
-            if (!underCtxRoot && !underCwd) {
+            const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT ? pathResolve(process.env.CTX_FRAMEWORK_ROOT) : '';
+            const userHome = process.env.USERPROFILE || process.env.HOME || '';
+            const isUnder = (dir: string, root: string) =>
+              root && (dir === root || dir.startsWith(root + sep));
+            const allowed = isUnder(resolvedDir, ctxRoot)
+              || isUnder(resolvedDir, cwd)
+              || isUnder(resolvedDir, frameworkRoot)
+              || isUnder(resolvedDir, userHome);
+            if (!allowed) {
               response = { success: false, error: 'Invalid worker dir' };
             } else {
               this.agentManager.spawnWorker(d.name, resolvedDir, d.prompt, d.parent, d.model)

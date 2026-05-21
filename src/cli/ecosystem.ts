@@ -93,7 +93,7 @@ export const ecosystemCommand = new Command('ecosystem')
     const isWindows = process.platform === 'win32';
     const nextBin = join(dashboardDir, 'node_modules', 'next', 'dist', 'bin', 'next');
     const dashboardScript = isWindows && existsSync(nextBin) ? nextBin : 'npm';
-    const dashboardArgs = isWindows && existsSync(nextBin) ? 'dev' : 'run dev';
+    const dashboardArgs = isWindows && existsSync(nextBin) ? 'start' : 'run start';
 
     // windowsHide: stops PM2 from attaching a visible "next-server" console
     // window to the dashboard process at boot on Windows. PM2's default

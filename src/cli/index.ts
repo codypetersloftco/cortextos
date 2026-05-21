@@ -64,7 +64,7 @@ const crashAlertCommand = new Command('crash-alert')
   .description('SessionEnd hook: send crash/restart notification via Telegram (cross-platform)')
   .action(() => {
     const hookPath = join(__dirname, 'hooks/hook-crash-alert.js');
-    const result = spawnSync(process.execPath, [hookPath], { stdio: 'inherit' });
+    const result = spawnSync(process.execPath, [hookPath], { stdio: 'inherit', windowsHide: true });
     process.exit(result.status ?? 0);
   });
 program.addCommand(crashAlertCommand);

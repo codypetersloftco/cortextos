@@ -119,7 +119,7 @@ export function notifyAgents(opts: {
       execFile(
         'cortextos',
         ['bus', 'send-message', target, 'high', body],
-        { timeout: 10_000 },
+        { timeout: 10_000, windowsHide: true },
         () => { /* fire-and-forget */ },
       );
     } catch { /* best-effort, never throw */ }

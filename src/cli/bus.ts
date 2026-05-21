@@ -1216,6 +1216,7 @@ busCommand
       execFileSync(pythonPath, [mmragPath, 'collections'], {
         stdio: 'inherit',
         env: envVars,
+        windowsHide: true,
       });
     } catch {
       // python printed error already
@@ -1230,7 +1231,7 @@ busCommand
 
 function runHook(hookName: string): void {
   const hookPath = join(__dirname, `hooks/${hookName}.js`);
-  const result = spawnSync(process.execPath, [hookPath], { stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [hookPath], { stdio: 'inherit', windowsHide: true });
   process.exit(result.status ?? 0);
 }
 

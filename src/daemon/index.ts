@@ -170,7 +170,7 @@ function sendCrashLoopAlertBestEffort(
       `https://api.telegram.org/bot${creds.botToken}/sendMessage`,
       '-d', `chat_id=${creds.chatId}`,
       '--data-urlencode', `text=${message}`,
-    ], { timeout: TELEGRAM_SEND_TIMEOUT_MS, stdio: 'pipe' });
+    ], { timeout: TELEGRAM_SEND_TIMEOUT_MS, stdio: 'pipe', windowsHide: true });
     if (r.status === 0) {
       console.error('[daemon] Crash-loop alert sent to operator chat');
       return true;

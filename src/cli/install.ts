@@ -18,8 +18,8 @@ function tryInstallGlobal(pkg: string): boolean {
   // On Windows, 'npm' is a .cmd wrapper; use shell to resolve it.
   // Pass as single string to avoid DEP0190 deprecation warning.
   const result = IS_WINDOWS
-    ? spawnSync(`npm install -g ${pkg}`, { stdio: 'inherit', timeout: 120000, shell: true })
-    : spawnSync('npm', ['install', '-g', pkg], { stdio: 'inherit', timeout: 120000 });
+    ? spawnSync(`npm install -g ${pkg}`, { stdio: 'inherit', timeout: 120000, shell: true, windowsHide: true })
+    : spawnSync('npm', ['install', '-g', pkg], { stdio: 'inherit', timeout: 120000, windowsHide: true });
   return result.status === 0;
 }
 
@@ -29,26 +29,26 @@ function commandExists(cmd: string): boolean {
   // system PATH — without it, where.exe can miss tools installed via
   // WinGet or user-space installers when PATH contains Unix-style paths.
   if (IS_WINDOWS) {
-    const result = spawnSync(`where ${cmd}`, { stdio: 'pipe', shell: true });
+    const result = spawnSync(`where ${cmd}`, { stdio: 'pipe', shell: true, windowsHide: true });
     return result.status === 0;
   }
-  const result = spawnSync('which', [cmd], { stdio: 'pipe' });
+  const result = spawnSync('which', [cmd], { stdio: 'pipe', windowsHide: true });
   return result.status === 0;
 }
 
 function tryInstallJq(): boolean {
   if (IS_MAC && commandExists('brew')) {
-    try { execSync('brew install jq', { stdio: 'inherit' }); return true; } catch { return false; }
+    try { execSync('brew install jq', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
   }
   if (!IS_WINDOWS && !IS_MAC) {
-    try { execSync('sudo apt-get install -y jq', { stdio: 'inherit' }); return true; } catch { return false; }
+    try { execSync('sudo apt-get install -y jq', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
   }
   if (IS_WINDOWS) {
     if (commandExists('winget')) {
-      try { execSync('winget install jqlang.jq --silent', { stdio: 'inherit' }); return true; } catch { /* try choco */ }
+      try { execSync('winget install jqlang.jq --silent', { stdio: 'inherit', windowsHide: true }); return true; } catch { /* try choco */ }
     }
     if (commandExists('choco')) {
-      try { execSync('choco install jq -y', { stdio: 'inherit' }); return true; } catch { return false; }
+      try { execSync('choco install jq -y', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
     }
   }
   return false;
@@ -56,24 +56,24 @@ function tryInstallJq(): boolean {
 
 function tryInstallWhisperCpp(): boolean {
   if (IS_MAC && commandExists('brew')) {
-    try { execSync('brew install whisper-cpp', { stdio: 'inherit' }); return true; } catch { return false; }
+    try { execSync('brew install whisper-cpp', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
   }
   return false;
 }
 
 function tryInstallFfmpeg(): boolean {
   if (IS_MAC && commandExists('brew')) {
-    try { execSync('brew install ffmpeg', { stdio: 'inherit' }); return true; } catch { return false; }
+    try { execSync('brew install ffmpeg', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
   }
   if (!IS_WINDOWS && !IS_MAC) {
-    try { execSync('sudo apt-get install -y ffmpeg', { stdio: 'inherit' }); return true; } catch { return false; }
+    try { execSync('sudo apt-get install -y ffmpeg', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
   }
   if (IS_WINDOWS) {
     if (commandExists('winget')) {
-      try { execSync('winget install Gyan.FFmpeg --silent', { stdio: 'inherit' }); return true; } catch { /* try choco */ }
+      try { execSync('winget install Gyan.FFmpeg --silent', { stdio: 'inherit', windowsHide: true }); return true; } catch { /* try choco */ }
     }
     if (commandExists('choco')) {
-      try { execSync('choco install ffmpeg -y', { stdio: 'inherit' }); return true; } catch { return false; }
+      try { execSync('choco install ffmpeg -y', { stdio: 'inherit', windowsHide: true }); return true; } catch { return false; }
     }
   }
   return false;
@@ -94,7 +94,7 @@ export const installCommand = new Command('install')
 
     // Node.js
     try {
-      const v = execSync('node --version', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+      const v = execSync('node --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim();
       const major = parseInt(v.replace('v', '').split('.')[0], 10);
       if (major < 20) {
         console.error(`  ✗ node: v${major} too old (need v20+). Install from https://nodejs.org`);
@@ -109,7 +109,7 @@ export const installCommand = new Command('install')
     // Claude Code
     let claudeOk = false;
     try {
-      const v = execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n')[0];
+      const v = execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim().split('\n')[0];
       console.log(`  ✓ claude: ${v}`);
       claudeOk = true;
     } catch {
@@ -117,7 +117,7 @@ export const installCommand = new Command('install')
       console.log('    Auto-installing Claude Code...');
       if (tryInstallGlobal('@anthropic-ai/claude-code')) {
         try {
-          const v = execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe' }).trim().split('\n')[0];
+          const v = execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim().split('\n')[0];
           console.log(`  ✓ claude: ${v} (just installed)`);
           claudeOk = true;
         } catch { /* PATH may need refresh */ }
@@ -133,7 +133,7 @@ export const installCommand = new Command('install')
     {
       let authenticated = false;
       try {
-        const authOutput = execSync('claude auth status', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const authOutput = execSync('claude auth status', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim();
         if (authOutput.includes('"loggedIn": true') || authOutput.includes('"loggedIn":true')) {
           authenticated = true;
         }
@@ -215,7 +215,7 @@ export const installCommand = new Command('install')
       console.log('  - pm2: not found. Installing...');
       if (tryInstallGlobal('pm2')) {
         try {
-          const v = execSync('pm2 --version', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+          const v = execSync('pm2 --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim();
           console.log(`  ✓ pm2: ${v} (just installed)`);
         } catch {
           console.log('  ✓ pm2: installed (restart terminal if pm2 not in PATH)');
@@ -225,7 +225,7 @@ export const installCommand = new Command('install')
       }
     } else {
       try {
-        const v = execSync('pm2 --version', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const v = execSync('pm2 --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim();
         console.log(`  ✓ pm2: ${v}`);
       } catch {
         console.log('  ✓ pm2: installed');
@@ -237,7 +237,7 @@ export const installCommand = new Command('install')
       console.log('  - jq: not found. Installing...');
       const installed = tryInstallJq();
       if (installed && commandExists('jq')) {
-        const v = execSync('jq --version', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const v = execSync('jq --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim();
         console.log(`  ✓ jq: ${v} (just installed)`);
       } else {
         console.log('  ! jq: could not auto-install.');
@@ -248,7 +248,7 @@ export const installCommand = new Command('install')
       }
     } else {
       try {
-        const v = execSync('jq --version', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+        const v = execSync('jq --version', { encoding: 'utf-8', stdio: 'pipe', windowsHide: true }).trim();
         console.log(`  ✓ jq: ${v}`);
       } catch {
         console.log('  ✓ jq: installed');
@@ -292,7 +292,7 @@ export const installCommand = new Command('install')
     // GGML whisper model — idempotent download via shipped script.
     const modelScript = join(process.cwd(), 'scripts', 'install-whisper-model.sh');
     if (existsSync(modelScript)) {
-      const modelResult = spawnSync('bash', [modelScript], { stdio: 'inherit', timeout: 5 * 60 * 1000 });
+      const modelResult = spawnSync('bash', [modelScript], { stdio: 'inherit', timeout: 5 * 60 * 1000, windowsHide: true });
       if (modelResult.status !== 0) {
         console.log('  ! whisper model: download failed. Re-run: bash scripts/install-whisper-model.sh');
       }
@@ -307,7 +307,7 @@ export const installCommand = new Command('install')
     if (commandExists(python3Cmd)) {
       if (!existsSync(kbVenvDir)) {
         console.log('  - Knowledge Base venv: not found. Creating...');
-        const venvResult = spawnSync(python3Cmd, ['-m', 'venv', kbVenvDir], { stdio: 'inherit', timeout: 60000 });
+        const venvResult = spawnSync(python3Cmd, ['-m', 'venv', kbVenvDir], { stdio: 'inherit', timeout: 60000, windowsHide: true });
         if (venvResult.status === 0) {
           console.log('  ✓ Knowledge Base venv created');
           // Install KB dependencies
@@ -315,7 +315,7 @@ export const installCommand = new Command('install')
             const pip = IS_WINDOWS
               ? join(kbVenvDir, 'Scripts', 'pip')
               : join(kbVenvDir, 'bin', 'pip');
-            const pipResult = spawnSync(pip, ['install', '--quiet', '-r', kbReqs], { stdio: 'inherit', timeout: 120000 });
+            const pipResult = spawnSync(pip, ['install', '--quiet', '-r', kbReqs], { stdio: 'inherit', timeout: 120000, windowsHide: true });
             if (pipResult.status === 0) {
               console.log('  ✓ Knowledge Base dependencies installed');
             } else {
@@ -426,8 +426,8 @@ export const installCommand = new Command('install')
     // Register cortextos CLI globally so agent PTY sessions can find it
     console.log('Registering cortextos CLI globally...');
     const linkResult = IS_WINDOWS
-      ? spawnSync('npm link', { stdio: 'pipe', cwd: process.cwd(), timeout: 30000, shell: true })
-      : spawnSync('npm', ['link'], { stdio: 'pipe', cwd: process.cwd(), timeout: 30000 });
+      ? spawnSync('npm link', { stdio: 'pipe', cwd: process.cwd(), timeout: 30000, shell: true, windowsHide: true })
+      : spawnSync('npm', ['link'], { stdio: 'pipe', cwd: process.cwd(), timeout: 30000, windowsHide: true });
     if (linkResult.status === 0) {
       console.log('  ✓ cortextos registered globally (npm link)');
     } else {

@@ -100,7 +100,7 @@ export function hardRestart(paths: BusPaths, agentName: string, reason?: string)
 export function autoCommit(projectDir: string, dryRun: boolean = false): AutoCommitReport {
   // Check if git repo
   try {
-    execSync('git rev-parse --is-inside-work-tree', { cwd: projectDir, stdio: 'pipe' });
+    execSync('git rev-parse --is-inside-work-tree', { cwd: projectDir, stdio: 'pipe', windowsHide: true });
   } catch {
     return { status: 'clean', staged: [], blocked: [] };
   }
@@ -108,7 +108,7 @@ export function autoCommit(projectDir: string, dryRun: boolean = false): AutoCom
   // Get changed files
   let porcelainOutput: string;
   try {
-    porcelainOutput = execSync('git status --porcelain', { cwd: projectDir, encoding: 'utf-8' });
+    porcelainOutput = execSync('git status --porcelain', { cwd: projectDir, encoding: 'utf-8', windowsHide: true });
   } catch {
     return { status: 'clean', staged: [], blocked: [] };
   }
@@ -198,7 +198,7 @@ export function autoCommit(projectDir: string, dryRun: boolean = false): AutoCom
   // Stage safe files
   for (const file of staged) {
     try {
-      execFileSync('git', ['add', file], { cwd: projectDir, stdio: 'pipe' });
+      execFileSync('git', ['add', file], { cwd: projectDir, stdio: 'pipe', windowsHide: true });
     } catch {
       // Ignore individual add failures
     }
@@ -207,7 +207,7 @@ export function autoCommit(projectDir: string, dryRun: boolean = false): AutoCom
   // Get diff stat
   let diffStat: string | undefined;
   try {
-    const stat = execSync('git diff --cached --stat', { cwd: projectDir, encoding: 'utf-8' });
+    const stat = execSync('git diff --cached --stat', { cwd: projectDir, encoding: 'utf-8', windowsHide: true });
     const lines = stat.trim().split('\n');
     diffStat = lines[lines.length - 1]?.trim() || undefined;
   } catch {

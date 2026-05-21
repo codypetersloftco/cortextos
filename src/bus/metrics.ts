@@ -320,7 +320,7 @@ export function checkUpstream(
   frameworkRoot: string,
   options: { apply?: boolean } = {},
 ): UpstreamResult {
-  const execOpts = { cwd: frameworkRoot, encoding: 'utf-8' as const, timeout: 30000 };
+  const execOpts = { cwd: frameworkRoot, encoding: 'utf-8' as const, timeout: 30000, windowsHide: true };
 
   // Check if it's a git repo
   try {
