@@ -24,3 +24,5 @@ export type { TimeAgoProps } from './time-ago';
 
 export { FilterBar } from './filter-bar';
 export type { FilterBarProps, FilterConfig, FilterOption } from './filter-bar';
+
+export { Linkify } from './linkify';

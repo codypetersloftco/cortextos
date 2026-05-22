@@ -23,12 +23,16 @@ const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
 const QUIET_HOUR_END_LA = 7;                    // 07:00 America/Los_Angeles
 
-// End types that are routine and should be suppressed during quiet hours.
-// "crash" is deliberately NOT in this list — a genuine unexpected crash at
-// 3am is worth waking up for.
-const QUIET_SUPPRESSED_TYPES = new Set([
+// Always suppressed — these are routine lifecycle events that never need
+// a Telegram notification regardless of time of day.
+const ALWAYS_SUPPRESSED_TYPES = new Set([
   'planned-restart',
   'session-refresh',
+]);
+
+// Suppressed during quiet hours only. "crash" and "daemon-crashed" are
+// deliberately NOT in either list — worth waking up for.
+const QUIET_SUPPRESSED_TYPES = new Set([
   'daemon-stop',
   'user-restart',
   'user-disable',
@@ -242,6 +246,9 @@ async function main(): Promise<void> {
   } catch { /* ignore */ }
 
   // Decide whether to actually send to Telegram.
+  if (ALWAYS_SUPPRESSED_TYPES.has(endType)) {
+    return;
+  }
   const now = new Date();
   const quiet = isQuietHoursLA(now);
   if (quiet && QUIET_SUPPRESSED_TYPES.has(endType)) {
