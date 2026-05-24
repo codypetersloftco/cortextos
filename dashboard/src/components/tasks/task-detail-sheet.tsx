@@ -26,6 +26,7 @@ import {
   StatusBadge,
   OrgBadge,
   TimeAgo,
+  Linkify,
 } from '@/components/shared';
 import { IconPencil, IconFile, IconPhoto, IconFileText, IconCode } from '@tabler/icons-react';
 import { DeliverablePreview } from '@/components/tasks/deliverable-preview';
@@ -290,7 +291,7 @@ export function TaskDetailSheet({
           ) : task.description ? (
             <div>
               <p className="text-sm text-muted-foreground mb-1">Description</p>
-              <p className="text-sm whitespace-pre-wrap">{task.description}</p>
+              <p className="text-sm whitespace-pre-wrap"><Linkify text={task.description} /></p>
             </div>
           ) : null}
 

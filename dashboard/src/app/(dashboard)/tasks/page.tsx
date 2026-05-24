@@ -3,12 +3,13 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useOrg } from '@/hooks/use-org';
 import { Button } from '@/components/ui/button';
-import { IconLayoutKanban, IconList, IconChecklist } from '@tabler/icons-react';
+import { IconLayoutKanban, IconList, IconChecklist, IconAlertTriangle } from '@tabler/icons-react';
 import { KanbanBoard } from '@/components/tasks/kanban-board';
 import { TaskListTable } from '@/components/tasks/task-list-table';
 import { TaskDetailSheet } from '@/components/tasks/task-detail-sheet';
 import { CreateTaskDialog } from '@/components/tasks/create-task-dialog';
 import { TaskFilters } from '@/components/tasks/task-filters';
+import { HumanTaskBanner } from '@/components/tasks/human-task-banner';
 import type { Task, TaskStatus } from '@/lib/types';
 
 type ViewMode = 'kanban' | 'list';
@@ -191,6 +192,9 @@ export default function TasksPage() {
         onChange={handleFilterChange}
         onClearAll={handleClearFilters}
       />
+
+      {/* Human tasks banner */}
+      <HumanTaskBanner tasks={tasks} onTaskClick={handleTaskClick} />
 
       {/* Content */}
       {tasks.length === 0 ? (
