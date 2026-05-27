@@ -265,6 +265,37 @@ export interface GoalsMdFields {
   [key: string]: string;
 }
 
+// -- Apps / PM2 Types --
+
+export type Pm2Status = 'online' | 'stopped' | 'errored' | 'stopping' | 'launching' | 'one-launch-status';
+
+export interface ProcessInfo {
+  name: string;
+  pmId: number;
+  pid: number | null;
+  status: Pm2Status;
+  cpuPercent: number;
+  memoryMb: number;
+  restarts: number;
+  uptime: number | null; // ms-since-epoch when process started (null when stopped)
+  autorestart: boolean;
+  url: string | null; // localhost URL for apps with a web UI (null for workers)
+}
+
+export type InfraStatus = 'up' | 'down';
+
+export interface InfraService {
+  name: string;
+  port: number;
+  status: InfraStatus;
+}
+
+export interface AppsData {
+  processes: ProcessInfo[];
+  infra: InfraService[];
+  lastUpdated: string;
+}
+
 // -- Agent Discovery Types --
 
 export interface AgentPaths {

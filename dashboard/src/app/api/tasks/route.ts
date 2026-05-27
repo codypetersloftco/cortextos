@@ -8,7 +8,7 @@ import { syncAll } from '@/lib/sync';
 export const dynamic = 'force-dynamic';
 
 // Security (H4): frameworkRoot must match a safe path pattern — no shell metacharacters.
-const SAFE_PATH_REGEX = /^[/\w.-]+$/;
+const SAFE_PATH_REGEX = /^[/\\\w.:-]+$/;
 
 // ---------------------------------------------------------------------------
 // Validation constants
