@@ -13,6 +13,8 @@ const ALLOWED_APPS = new Set([
   'lot-status-frontend',
   'fbi-backend',
   'fbi-frontend',
+  'cortextos-daemon',
+  'cortextos-dashboard',
 ]);
 
 const ALLOWED_ACTIONS = new Set(['start', 'stop', 'restart']);

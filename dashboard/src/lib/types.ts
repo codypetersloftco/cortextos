@@ -290,8 +290,24 @@ export interface InfraService {
   status: InfraStatus;
 }
 
-export interface AppsData {
+export interface AppGroupProduction {
+  url: string;
+  healthUrl: string;
+  label: string;
+  status: 'up' | 'down';
+}
+
+export interface AppGroup {
+  id: string;
+  label: string;
   processes: ProcessInfo[];
+  infraDeps: string[];
+  platform: boolean;
+  production?: AppGroupProduction;
+}
+
+export interface AppsData {
+  groups: AppGroup[];
   infra: InfraService[];
   lastUpdated: string;
 }
