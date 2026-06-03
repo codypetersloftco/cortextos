@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { join } from 'path';
 
 // Capture PTY exit handler so tests can simulate worker exit
 let capturedOnExit: ((code: number) => void) | null = null;
@@ -29,10 +30,11 @@ vi.mock('../../../src/pty/inject.js', () => ({
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
-  return { ...actual, mkdirSync: vi.fn() };
+  return { ...actual, mkdirSync: vi.fn(), writeFileSync: vi.fn(), unlinkSync: vi.fn() };
 });
 
 const { WorkerProcess } = await import('../../../src/daemon/worker-process.js');
+const { writeFileSync: mockWriteFileSync, unlinkSync: mockUnlinkSync } = await import('fs');
 
 const mockEnv = {
   instanceId: 'test',
@@ -52,6 +54,8 @@ beforeEach(() => {
   mockPty.kill.mockClear();
   mockPty.write.mockClear();
   mockInjectMessage.mockClear();
+  vi.mocked(mockWriteFileSync).mockClear();
+  vi.mocked(mockUnlinkSync).mockClear();
 });
 
 describe('WorkerProcess', () => {
@@ -188,6 +192,44 @@ describe('WorkerProcess', () => {
       await w.spawn(mockEnv, 'task');
       // AgentPTY(env, config, logPath, bootstrapPattern, isEphemeralWorker)
       expect(capturedPtyArgs[4]).toBe(true);
+    });
+  });
+
+  describe('ephemeral-worker filesystem marker (Windows-safe Stop-hook gate)', () => {
+    it('writes the marker in the worker cwd (dir) before the session starts', async () => {
+      const w = new WorkerProcess('w-mark', '/tmp/proj', undefined);
+      await w.spawn(mockEnv, 'task');
+      expect(vi.mocked(mockWriteFileSync)).toHaveBeenCalledWith(
+        join('/tmp/proj', '.cortextos-ephemeral-worker'),
+        expect.stringContaining('w-mark'),
+        'utf-8',
+      );
+      // written before spawn so it exists by the time the Stop hook fires
+      const writeOrder = vi.mocked(mockWriteFileSync).mock.invocationCallOrder[0];
+      const spawnOrder = mockPty.spawn.mock.invocationCallOrder[0];
+      expect(writeOrder).toBeLessThan(spawnOrder);
+    });
+
+    it('removes the marker on normal exit', async () => {
+      const w = new WorkerProcess('w-mark2', '/tmp/proj', undefined);
+      await w.spawn(mockEnv, 'task');
+      capturedOnExit!(0);
+      expect(vi.mocked(mockUnlinkSync)).toHaveBeenCalledWith(
+        join('/tmp/proj', '.cortextos-ephemeral-worker'),
+      );
+    });
+
+    it('removes the marker on terminate (watchdog path)', async () => {
+      const w = new WorkerProcess('w-mark3', '/tmp/proj', undefined);
+      await w.spawn(mockEnv, 'task');
+      await w.terminate();
+      expect(vi.mocked(mockUnlinkSync)).toHaveBeenCalledWith(
+        join('/tmp/proj', '.cortextos-ephemeral-worker'),
+      );
+    });
+
+    it('exposes the marker filename as a constant', () => {
+      expect(WorkerProcess.EPHEMERAL_MARKER).toBe('.cortextos-ephemeral-worker');
     });
   });
 

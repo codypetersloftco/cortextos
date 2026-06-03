@@ -1,5 +1,5 @@
 import { join } from 'path';
-import { mkdirSync } from 'fs';
+import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import type { CtxEnv, WorkerStatus, WorkerStatusValue } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
 import { injectMessage } from '../pty/inject.js';
@@ -33,6 +33,30 @@ export class WorkerProcess {
   // future one. Default 45min — well beyond normal worker runtime.
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private static readonly DEFAULT_MAX_RUNTIME_MS = 45 * 60 * 1000;
+  // Filesystem signal that the memory-checkpoint Stop hook checks to skip ephemeral
+  // workers. The hook receives `cwd` on stdin and looks for `<cwd>/<this file>`.
+  // This is the RELIABLE signal: the env var CTX_EPHEMERAL_WORKER does not reliably
+  // cross the node-pty/ConPTY → claude → bash-hook boundary on Windows, so a worker
+  // could still hang in the blocking hook even with the var set. A file in the
+  // worker's cwd (= AgentPTY cwd = this.dir) is env-independent and cross-platform.
+  static readonly EPHEMERAL_MARKER = '.cortextos-ephemeral-worker';
+
+  /** Absolute path to this worker's ephemeral marker (in its working dir = claude cwd). */
+  private get markerPath(): string {
+    return join(this.dir, WorkerProcess.EPHEMERAL_MARKER);
+  }
+
+  private writeMarker(): void {
+    try {
+      writeFileSync(this.markerPath, `${this.name} ${this.spawnedAt}\n`, 'utf-8');
+    } catch { /* best-effort; watchdog is the backstop if this fails */ }
+  }
+
+  private removeMarker(): void {
+    try {
+      unlinkSync(this.markerPath);
+    } catch { /* already gone / never written — fine */ }
+  }
 
   constructor(
     name: string,
@@ -69,6 +93,7 @@ export class WorkerProcess {
 
     this.pty.onExit((code) => {
       this.clearWatchdog();
+      this.removeMarker();
       this.exitCode = code;
       this.status = code === 0 ? 'completed' : 'failed';
       this.log(`Exited with code ${code} → ${this.status}`);
@@ -77,6 +102,10 @@ export class WorkerProcess {
       }
       this.pty = null;
     });
+
+    // Write the ephemeral marker BEFORE the session starts so it exists by the time
+    // the worker finishes its task and the Stop hook fires. Removed on exit/terminate.
+    this.writeMarker();
 
     await this.pty.spawn('fresh', prompt);
     this.status = 'running';
@@ -109,6 +138,7 @@ export class WorkerProcess {
    */
   async terminate(): Promise<void> {
     this.clearWatchdog();
+    this.removeMarker();
     if (!this.pty) return;
     this.log('Terminating...');
     try {

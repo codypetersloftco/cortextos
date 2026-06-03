@@ -8,6 +8,8 @@ node_modules/
 !templates/**/.claude/**
 dist/
 ecosystem.config.js
+# Transient ephemeral-worker marker (written in a worker's cwd, removed on exit)
+.cortextos-ephemeral-worker
 
 # User-created org data (not part of the framework)
 orgs/
