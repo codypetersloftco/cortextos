@@ -68,3 +68,51 @@ describe('AgentPTY — ephemeral-worker env gate', () => {
     expect(calls[0].opts.env?.CTX_EPHEMERAL_WORKER).toBeUndefined();
   });
 });
+
+/**
+ * Root-cause coverage for the worker-hang v3 fix: an ephemeral worker must launch
+ * HEADLESS (`--print`) so the claude process exits when the one-shot task finishes.
+ * Interactive sessions never emit a process exit, and WorkerProcess detects worker
+ * completion ONLY via pty.onExit — so an interactive worker idles until the 45min
+ * watchdog. Persistent agents must stay interactive (no --print) so they keep
+ * running and accept injected messages.
+ */
+describe('AgentPTY — ephemeral-worker headless gate', () => {
+  it('passes --print --output-format text when isEphemeralWorker=true', async () => {
+    vi.useFakeTimers();
+    const { fn, calls } = fakeSpawnCapture();
+    const pty = new AgentPTY(env as never, {}, undefined, undefined, true);
+    (pty as unknown as { spawnFn: unknown }).spawnFn = fn;
+    await pty.spawn('fresh', 'do the task');
+    const args = calls[0].args;
+    expect(args).toContain('--print');
+    const ofIdx = args.indexOf('--output-format');
+    expect(ofIdx).toBeGreaterThanOrEqual(0);
+    expect(args[ofIdx + 1]).toBe('text');
+    // The prompt must remain the final positional arg after the flags.
+    expect(args[args.length - 1]).toBe('do the task');
+  });
+
+  it('does NOT pass --print for a normal persistent agent (stays interactive)', async () => {
+    vi.useFakeTimers();
+    const { fn, calls } = fakeSpawnCapture();
+    const pty = new AgentPTY(env as never, {}, undefined, undefined, false);
+    (pty as unknown as { spawnFn: unknown }).spawnFn = fn;
+    await pty.spawn('fresh', 'do the task');
+    const args = calls[0].args;
+    expect(args).not.toContain('--print');
+    expect(args).not.toContain('--output-format');
+  });
+
+  it('keeps --print alongside --continue for a resumed worker', async () => {
+    vi.useFakeTimers();
+    const { fn, calls } = fakeSpawnCapture();
+    const pty = new AgentPTY(env as never, {}, undefined, undefined, true);
+    (pty as unknown as { spawnFn: unknown }).spawnFn = fn;
+    await pty.spawn('continue', 'resume the task');
+    const args = calls[0].args;
+    expect(args).toContain('--continue');
+    expect(args).toContain('--print');
+    expect(args[args.length - 1]).toBe('resume the task');
+  });
+});

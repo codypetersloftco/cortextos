@@ -251,6 +251,22 @@ export class AgentPTY {
 
     args.push('--dangerously-skip-permissions');
 
+    // Ephemeral one-shot workers MUST run headless so the claude process EXITS when
+    // the task is done. Interactively (the persistent-agent path), claude answers the
+    // prompt and then sits at the TUI forever — it never emits a process exit. But
+    // WorkerProcess detects completion ONLY via pty.onExit, so an interactive worker
+    // is never seen as "done" and idles until the 45min watchdog force-terminates it
+    // (the residual hang boss observed after the v2 marker-gate fix). `--print` runs
+    // the FULL agentic loop (tools, MCP, multi-turn reasoning) and then exits the
+    // process on completion. `--output-format text` is sufficient — the worker's
+    // stdout is captured to a log file and only the clean exit matters. Persistent
+    // agents stay interactive (they must keep running and accept injected messages).
+    // NOTE: Stop hooks still fire in -p mode, so the filesystem-marker gate that
+    // skips the memory-checkpoint hook for workers remains necessary and valid.
+    if (this.isEphemeralWorker) {
+      args.push('--print', '--output-format', 'text');
+    }
+
     if (this.config.model) {
       args.push('--model', this.config.model);
     }
