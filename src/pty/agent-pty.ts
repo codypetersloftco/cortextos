@@ -36,11 +36,19 @@ export class AgentPTY {
   private config: AgentConfig;
   private onExitHandler: ((exitCode: number, signal?: number) => void) | null = null;
   private spawnFn: SpawnFn | null = null;
+  private isEphemeralWorker: boolean;
 
-  constructor(env: CtxEnv, config: AgentConfig, logPath?: string, bootstrapPattern?: string) {
+  constructor(
+    env: CtxEnv,
+    config: AgentConfig,
+    logPath?: string,
+    bootstrapPattern?: string,
+    isEphemeralWorker = false,
+  ) {
     this.env = env;
     this.config = config;
     this.outputBuffer = new OutputBuffer(1000, logPath, bootstrapPattern);
+    this.isEphemeralWorker = isEphemeralWorker;
   }
 
   /**
@@ -134,6 +142,18 @@ export class AgentPTY {
           }
         }
       } catch { /* leave unset if context.json is missing or malformed */ }
+    }
+
+    // Ephemeral workers must NOT run the persistent-agent memory-checkpoint Stop
+    // hook (the user-global mempalace `mempal_save_hook.sh`). That hook BLOCKS the
+    // Stop every N messages and tells the model to do a full memory save — correct
+    // for a long-lived agent, but on a one-shot worker it fires right as the task
+    // finishes and forces a 60-120min memory-save generation before the worker can
+    // exit (the "running stop hook · ↓21k tokens" hang). Mark the session so the
+    // hook can gate itself to persistent agents only. (Backstop: WorkerProcess also
+    // runs a max-runtime watchdog in case any future Stop hook misbehaves.)
+    if (this.isEphemeralWorker) {
+      ptyEnv['CTX_EPHEMERAL_WORKER'] = '1';
     }
 
     // Spawn the agent binary directly (no shell wrapper) — cross-platform, no shell escaping needed.

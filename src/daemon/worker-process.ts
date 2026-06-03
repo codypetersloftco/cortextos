@@ -26,6 +26,13 @@ export class WorkerProcess {
   private exitCode: number | undefined;
   private onDoneCallback: ((name: string, exitCode: number) => void) | null = null;
   private log: (msg: string) => void;
+  // Backstop watchdog: a worker should finish its one-shot task and exit. If it
+  // ever runs past this cap (e.g. a Stop hook blocks the exit), force-terminate
+  // it so it can't hang for hours. The primary fix (CTX_EPHEMERAL_WORKER gating
+  // the memory-checkpoint Stop hook) prevents the known hang; this bounds any
+  // future one. Default 45min — well beyond normal worker runtime.
+  private watchdog: ReturnType<typeof setTimeout> | null = null;
+  private static readonly DEFAULT_MAX_RUNTIME_MS = 45 * 60 * 1000;
 
   constructor(
     name: string,
@@ -43,7 +50,11 @@ export class WorkerProcess {
   /**
    * Spawn the worker Claude Code session with the given task prompt.
    */
-  async spawn(env: CtxEnv, prompt: string, config: { model?: string } = {}): Promise<void> {
+  async spawn(
+    env: CtxEnv,
+    prompt: string,
+    config: { model?: string; maxRuntimeMs?: number } = {},
+  ): Promise<void> {
     // Ensure bus dirs exist so the worker can use cortextos bus commands
     try {
       mkdirSync(join(env.ctxRoot, 'inbox', this.name), { recursive: true });
@@ -52,9 +63,12 @@ export class WorkerProcess {
     } catch { /* ignore */ }
 
     const logPath = join(env.ctxRoot, 'logs', this.name, 'stdout.log');
-    this.pty = new AgentPTY(env, config, logPath);
+    // 5th arg = isEphemeralWorker: sets CTX_EPHEMERAL_WORKER=1 so the global
+    // memory-checkpoint Stop hook skips this session (root-cause fix for the hang).
+    this.pty = new AgentPTY(env, config, logPath, undefined, true);
 
     this.pty.onExit((code) => {
+      this.clearWatchdog();
       this.exitCode = code;
       this.status = code === 0 ? 'completed' : 'failed';
       this.log(`Exited with code ${code} → ${this.status}`);
@@ -67,12 +81,34 @@ export class WorkerProcess {
     await this.pty.spawn('fresh', prompt);
     this.status = 'running';
     this.log(`Running (pid: ${this.pty.getPid()}, dir: ${this.dir})`);
+
+    // Arm the backstop watchdog.
+    const maxRuntimeMs = config.maxRuntimeMs ?? WorkerProcess.DEFAULT_MAX_RUNTIME_MS;
+    if (maxRuntimeMs > 0) {
+      this.watchdog = setTimeout(() => {
+        if (this.isFinished() || !this.pty) return;
+        this.log(
+          `Watchdog: exceeded max runtime (${Math.round(maxRuntimeMs / 60000)}min) — force-terminating (likely a hung Stop hook).`,
+        );
+        void this.terminate();
+      }, maxRuntimeMs);
+      // Don't let the watchdog keep the daemon event loop alive.
+      this.watchdog.unref?.();
+    }
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdog) {
+      clearTimeout(this.watchdog);
+      this.watchdog = null;
+    }
   }
 
   /**
    * Terminate the worker session.
    */
   async terminate(): Promise<void> {
+    this.clearWatchdog();
     if (!this.pty) return;
     this.log('Terminating...');
     try {

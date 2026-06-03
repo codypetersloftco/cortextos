@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Capture PTY exit handler so tests can simulate worker exit
 let capturedOnExit: ((code: number) => void) | null = null;
 let capturedPtyConfig: unknown = null;
+let capturedPtyArgs: unknown[] = [];
 const mockPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
@@ -14,8 +15,9 @@ const mockPty = {
 };
 
 vi.mock('../../../src/pty/agent-pty.js', () => ({
-  AgentPTY: function AgentPTY(_env: unknown, config: unknown) {
-    capturedPtyConfig = config;
+  AgentPTY: function AgentPTY(...args: unknown[]) {
+    capturedPtyArgs = args;
+    capturedPtyConfig = args[1];
     return mockPty;
   },
 }));
@@ -45,6 +47,7 @@ const mockEnv = {
 beforeEach(() => {
   capturedOnExit = null;
   capturedPtyConfig = null;
+  capturedPtyArgs = [];
   mockPty.spawn.mockClear();
   mockPty.kill.mockClear();
   mockPty.write.mockClear();
@@ -176,6 +179,57 @@ describe('WorkerProcess', () => {
       const w = new WorkerProcess('w14', '/tmp/proj', undefined);
       await w.terminate(); // should not throw
       expect(mockPty.kill).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ephemeral-worker Stop-hook gate (root-cause fix)', () => {
+    it('marks the PTY as an ephemeral worker so the memory-save Stop hook skips it', async () => {
+      const w = new WorkerProcess('w-eph', '/tmp/proj', undefined);
+      await w.spawn(mockEnv, 'task');
+      // AgentPTY(env, config, logPath, bootstrapPattern, isEphemeralWorker)
+      expect(capturedPtyArgs[4]).toBe(true);
+    });
+  });
+
+  describe('watchdog backstop', () => {
+    it('force-terminates a worker that exceeds maxRuntimeMs', async () => {
+      vi.useFakeTimers();
+      try {
+        const w = new WorkerProcess('w-wd', '/tmp/proj', undefined);
+        await w.spawn(mockEnv, 'task', { maxRuntimeMs: 1000 });
+        expect(mockPty.kill).not.toHaveBeenCalled();
+        // Fire the watchdog (1000ms) + let terminate()'s internal sleep(500) resolve.
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(mockPty.kill).toHaveBeenCalled();
+        expect(w.getStatus().status).toBe('completed');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does NOT fire after the worker exits normally (watchdog cleared)', async () => {
+      vi.useFakeTimers();
+      try {
+        const w = new WorkerProcess('w-wd2', '/tmp/proj', undefined);
+        await w.spawn(mockEnv, 'task', { maxRuntimeMs: 1000 });
+        capturedOnExit!(0); // normal completion clears the watchdog
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(mockPty.kill).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('can be disabled with maxRuntimeMs=0', async () => {
+      vi.useFakeTimers();
+      try {
+        const w = new WorkerProcess('w-wd3', '/tmp/proj', undefined);
+        await w.spawn(mockEnv, 'task', { maxRuntimeMs: 0 });
+        await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+        expect(mockPty.kill).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });
