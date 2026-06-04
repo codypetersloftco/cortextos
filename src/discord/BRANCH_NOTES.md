@@ -36,16 +36,38 @@ audit diff against the locked 6 criteria.
 - (b) `DISCORD_ALLOWED_USER` in secrets.env, mirrors `ALLOWED_USER` (comma-split, numeric-validated, Cody first). Not checked-in config.
 - (c) Drop-log = `dropped:<reason> author.id=.. channel=.. message=..` ONLY. Never body, never token, never display name.
 
-## ⚠ EMPIRICAL VERIFICATION — pending live token (criterion 5)
-**Claim (endorsed):** REST `GET /channels/{id}/messages` returns `content` via
-channel perms (View + Read Message History); the privileged MESSAGE CONTENT
-INTENT gates GATEWAY events only, NOT REST. ⇒ zero privileged intents needed.
+## ✅ EMPIRICAL VERIFICATION — criterion 5 RESOLVED (2026-06-04)
+**Original claim (WRONG, was endorsed):** "REST `GET /channels/{id}/messages`
+returns `content` via channel perms; MESSAGE CONTENT INTENT gates gateway only,
+not REST ⇒ zero privileged intents needed."
 
-**Not yet verified live** (no token at build time). When Cody's 3 inputs land
-(`DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, Cody's numeric user id):
-1. Confirm `getMessagesAfter` returns NON-EMPTY `content` for a Cody post.
-2. If empty ⇒ fallback: enable Message Content Intent in the Dev Portal (and note it here). Do NOT add gateway code.
-3. Record the result in this section before handing to boss for deploy.
+**Live result DISPROVED it.** With the intent OFF, REST returned the channel's
+10 messages WITH ids/authors/timestamps (View+ReadHistory perms fine) but
+`content=""` on ALL — including Cody's own message. Empty-content-with-metadata
+= the textbook signature of the intent being OFF. Discord gates `content` in
+BOTH gateway AND REST unless the Message Content privileged intent is enabled.
+The empirical gate caught the banked-on-assumption before a false bank.
+
+**FALLBACK ENGAGED + VERIFIED.** Cody enabled Message Content Intent (Dev Portal
+→ Loftco Agents → Bot → Privileged Gateway Intents → Message Content). NO code
+change. Re-run PASS:
+
+ARTIFACT 1 — CONTENT (`getMessagesAfter` on `1512097508866785504`): 9/10 msgs
+  non-empty. Cody's own msg `id=1512099108775788554` author.id `697195741294100602`
+  content = "Any idea why telegram is down?…" (was `""` pre-intent = true
+  before/after). Boss/webhook msgs all read full content.
+ARTIFACT 2 — GUILD COUNT (`GET /users/@me/guilds`): exactly 1 — `loftco-autopilot`
+  (id `1512097508296364163`).
+ARTIFACT 3 — CHANNEL-FENCE MATRIX: only `1512097508866785504` (#loftco-agents)
+  READABLE; every other channel 403; `single_readable_channel=True`.
+
+**Posture amend:** we DO need the one privileged intent (Message Content). Still
+least-privilege — REST-only, NO gateway, ONE channel. ⚠ Bot rides @everyone
+guild-wide VIEW_CHANNEL (fence is discipline-based, not structural) → standing
+guardrail: new loftco-autopilot channels must be PRIVATE, or the bot's
+content-read silently expands. Robust upgrade (later, verify-with-Cody): a
+category-level Loftco-Agents-role deny-VIEW propagates to new synced channels =
+by-construction fence, humans unaffected.
 
 ## ⚠ Scope: GUILD channel, not DM
 v1 channel MUST be a guild (server) text channel the bot has View + Read
