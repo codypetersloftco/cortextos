@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile } from '../../../src/bus/task';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile, isHumanTask, checkHumanTasks } from '../../../src/bus/task';
 import type { BusPaths } from '../../../src/types';
+import type { Task } from '../../../src/types';
 
 describe('Task Management', () => {
   let testDir: string;
@@ -791,5 +792,74 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
     expect(report.archived.map(a => a.id)).toEqual([id]);
     // Active JSON still present
     expect(existsSync(join(paths.taskDir, `${id}.json`))).toBe(true);
+  });
+});
+
+describe('isHumanTask + checkHumanTasks title-prefix detection (Theta #16 root-fix)', () => {
+  let testDir: string;
+  let paths: BusPaths;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-human-test-'));
+    paths = {
+      ctxRoot: testDir,
+      inbox: join(testDir, 'inbox', 'paul'),
+      inflight: join(testDir, 'inflight', 'paul'),
+      processed: join(testDir, 'processed', 'paul'),
+      logDir: join(testDir, 'logs', 'paul'),
+      stateDir: join(testDir, 'state', 'paul'),
+      taskDir: join(testDir, 'tasks'),
+      approvalDir: join(testDir, 'approvals'),
+      analyticsDir: join(testDir, 'analytics'),
+      heartbeatDir: join(testDir, 'heartbeats'),
+    };
+    mkdirSync(paths.taskDir, { recursive: true });
+  });
+  afterEach(() => rmSync(testDir, { recursive: true, force: true }));
+
+  const mk = (over: Partial<Task>): Task => ({
+    id: 'task_x', title: '', description: '', type: 'agent', status: 'pending',
+    assigned_to: 'engineer', created_by: 'engineer', org: 'acme', priority: 'normal',
+    project: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    ...over,
+  } as Task);
+
+  it('isHumanTask: a [HUMAN] title prefix ALONE qualifies (the root-fix)', () => {
+    expect(isHumanTask(mk({ title: '[HUMAN] do thing', assigned_to: 'engineer', project: '' }))).toBe(true);
+    expect(isHumanTask(mk({ title: '  [human] lower + leading space', assigned_to: 'analyst', project: '' }))).toBe(true);
+  });
+  it('isHumanTask: project + assignee signals still qualify', () => {
+    expect(isHumanTask(mk({ title: 'no prefix', project: 'human-tasks' }))).toBe(true);
+    expect(isHumanTask(mk({ title: 'no prefix', assigned_to: 'human', project: '' }))).toBe(true);
+    expect(isHumanTask(mk({ title: 'no prefix', assigned_to: 'user', project: '' }))).toBe(true);
+  });
+  it('isHumanTask: an ordinary agent task is NOT human (no false positive)', () => {
+    expect(isHumanTask(mk({ title: 'normal work', assigned_to: 'engineer', project: '' }))).toBe(false);
+    expect(isHumanTask(mk({ title: '[FIX] not human-prefixed', assigned_to: 'engineer', project: '' }))).toBe(false);
+  });
+
+  it('checkHumanTasks surfaces a stale title-only [HUMAN] task (no project, agent assignee)', () => {
+    const old = new Date(Date.now() - 30 * 3600 * 1000).toISOString(); // 30h > 24h staleness gate
+    // exact silent-failure shape: "[HUMAN]" title, NO --project, default agent assignee
+    writeFileSync(join(paths.taskDir, 'task_titleonly.json'), JSON.stringify(mk({
+      id: 'task_titleonly', title: '[HUMAN] review the thing', project: '', assigned_to: 'analyst',
+      created_at: old, updated_at: old,
+    })));
+    writeFileSync(join(paths.taskDir, 'task_normal.json'), JSON.stringify(mk({
+      id: 'task_normal', title: 'normal agent work', project: '', assigned_to: 'engineer',
+      created_at: old, updated_at: old,
+    })));
+    const surfaced = checkHumanTasks(paths).map(t => t.id);
+    expect(surfaced).toContain('task_titleonly'); // root-fix: now caught via the title prefix
+    expect(surfaced).not.toContain('task_normal');
+  });
+
+  it('checkHumanTasks does NOT surface a FRESH [HUMAN] task (< 24h staleness gate preserved)', () => {
+    const fresh = new Date().toISOString();
+    writeFileSync(join(paths.taskDir, 'task_fresh.json'), JSON.stringify(mk({
+      id: 'task_fresh', title: '[HUMAN] just created', project: '', assigned_to: 'analyst',
+      created_at: fresh, updated_at: fresh,
+    })));
+    expect(checkHumanTasks(paths).map(t => t.id)).not.toContain('task_fresh');
   });
 });

@@ -604,6 +604,24 @@ function readAllTasks(taskDir: string): Task[] {
 }
 
 /**
+ * True if a task is a [HUMAN]-class task the human/orchestrator must action.
+ * Keys on THREE independent signals — assignee, project, AND the `[HUMAN]` title
+ * prefix. The title signal defends against mis-filed creation: a task made with
+ * `create-task "[HUMAN] ..."` but WITHOUT `--project human-tasks` and with a default
+ * (agent) assignee is silently missed by the assignee/project-only checks. Surfacing
+ * such a task must not depend on the creator having set the project field correctly.
+ */
+export function isHumanTask(task: Task): boolean {
+  const title = (task.title ?? '').trimStart().toUpperCase();
+  return (
+    task.assigned_to === 'human' ||
+    task.assigned_to === 'user' ||
+    task.project === 'human-tasks' ||
+    title.startsWith('[HUMAN]')
+  );
+}
+
+/**
  * Check for stale tasks. Matches bash check-stale-tasks.sh behavior.
  */
 export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
@@ -640,12 +658,8 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
       report.stale_pending.push(task);
     }
 
-    // Human tasks: assigned to "human" or "user", or in human-tasks project
-    if (
-      (['human', 'user'].includes(task.assigned_to ?? '') ||
-        task.project === 'human-tasks') &&
-      createdAge > STALE_HUMAN
-    ) {
+    // Human tasks: assignee=human/user, in human-tasks project, OR [HUMAN] title prefix
+    if (isHumanTask(task) && createdAge > STALE_HUMAN) {
       report.stale_human.push(task);
     }
 
@@ -833,7 +847,10 @@ export function checkHumanTasks(paths: BusPaths): Task[] {
 
   for (const task of tasks) {
     if (task.status === 'completed' || task.status === 'cancelled') continue;
-    if (task.assigned_to !== 'human' && task.assigned_to !== 'user') continue;
+    // [HUMAN]-class = assignee human/user OR human-tasks project OR [HUMAN] title prefix.
+    // The title-prefix arm closes the blind spot where a `create-task "[HUMAN] ..."` task
+    // filed without --project and with a default agent assignee was never surfaced.
+    if (!isHumanTask(task)) continue;
 
     const createdEpoch = Math.floor(new Date(task.created_at).getTime() / 1000);
     const age = nowEpoch - createdEpoch;
