@@ -12,12 +12,16 @@ audit diff against the locked 6 criteria.
 ## Files
 - `src/discord/api.ts` — REST client. `getMessagesAfter(channelId, afterId)` (Bot-token auth, 15s timeout, snowflake-ascending sort via BigInt) + `postWebhook(url, content)` for outbound (no token; webhook self-auth; 2000-char split).
 - `src/discord/gate.ts` — **pure trust boundary** (unit-tested). `parseAllowedDiscordUsers` (fail-closed parse) + `routeDiscordInbound` (author.id-only auth, default-DENY, empty-allowlist drops all).
-- `src/discord/poller.ts` — `DiscordPoller`, mirrors `TelegramPoller`. Offset = last snowflake → `.discord-offset`. **Offset-after-handler**: cursor advances only after handlers succeed; a throw re-serves the message next poll.
+- `src/discord/poller.ts` — `DiscordPoller`, mirrors `TelegramPoller`. Offset = last snowflake → `.discord-offset`. **Offset-after-handler**: cursor advances only after handlers succeed; a throw re-serves the message next poll. **First-run seeding** (Sentinel rec i): with no persisted cursor, the first poll seeds to the newest existing message and injects nothing — only post-startup messages inject, so a channel's pre-existing history is never replayed (no stale-command-on-enable).
 - `src/discord/format.ts` — `formatDiscordTextMessage`: `=== DISCORD from [USER: ..] (channel:..) ===` + backtick-fenced body (mirrors Telegram; untrusted-inbound handling).
 - `src/cli/bus.ts` — `send-discord <message>` command (reads `DISCORD_WEBHOOK_URL` from `orgs/<org>/secrets.env`, logs outbound + emits `discord_sent`).
 - `src/daemon/agent-manager.ts` — `maybeStartDiscordInboundPoller` (orchestrator-only, mirrors `maybeStartActivityChannelPoller`); auth gate at ingest → `checker.queueTelegramMessage` (the transport-agnostic sink). + entry-type fields + `stopAgent` cleanup.
 - `src/types/index.ts` — `DiscordUser` / `DiscordMessage` (additive).
-- Tests: `tests/unit/discord/{gate,poller,send-discord}.test.ts` — 16 tests, all green.
+- Tests: `tests/unit/discord/{gate,poller,send-discord}.test.ts` — 19 tests, all green (incl. 3 first-run-seeding tests — seed-to-newest, empty-then-first, retry-on-error).
+
+## Post-audit hardening (after Sentinel PASS on 821a40a)
+- **Rec (i) resolved — first-run backlog seeding.** Added `DiscordPoller.seedOffset`: on initial enable (no `.discord-offset`), the first poll anchors the cursor to the channel's newest existing message and injects NOTHING; only messages posted after startup are processed. Eliminates the "replay pre-existing channel history as new (possibly stale) commands on enable" risk Sentinel flagged. Empty-channel-at-boot still injects the first real message normally. +2 tests.
+- Rec (ii) (harder analyst reject-alert) deferred to Sentinel's canary as she offered — v1 keeps orchestrator-session reject-notice.
 
 ## Mapping to Sentinel's 6 criteria
 1. **Auth on author.id only** — `routeDiscordInbound` keys off `msg.author.id` (snowflake string); username/global_name never consulted. Test: "authorizes on author.id ONLY — non-allowed id dropped even if username looks legit".

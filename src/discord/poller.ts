@@ -34,6 +34,15 @@ export class DiscordPoller {
   private messageHandlers: DiscordMessageHandler[] = [];
   private pollInterval: number;
   private log: (msg: string) => void;
+  /**
+   * True once the cursor is anchored — either loaded from a persisted
+   * `.discord-offset` OR seeded on first run. Until then, the first poll
+   * SEEDS to the newest existing message (seedOffset) rather than processing
+   * backlog — so initial enable never replays a channel's pre-existing
+   * history as new (a stale authorized message could otherwise fire as a
+   * command). Only messages posted AFTER startup inject. (Sentinel audit rec i.)
+   */
+  private seeded: boolean = false;
 
   /**
    * Why the poll loop last exited (read by a supervisor if one is wired):
@@ -90,6 +99,17 @@ export class DiscordPoller {
    * cursor at the last fully-processed message.
    */
   async pollOnce(): Promise<void> {
+    // First run with no persisted cursor: seed to the newest existing message
+    // and inject NOTHING this cycle. Only messages posted after startup will
+    // be processed — never the pre-existing backlog. Seeding only commits
+    // (this.seeded = true) when the anchor was actually determined; a transient
+    // fetch error returns false so we RETRY the seed next cycle rather than
+    // fall through and replay the backlog from offset 0.
+    if (!this.seeded) {
+      this.seeded = await this.seedOffset();
+      return;
+    }
+
     const messages = await this.api.getMessagesAfter(this.channelId, this.offset, 100);
     if (!messages.length) return;
 
@@ -114,13 +134,47 @@ export class DiscordPoller {
     }
   }
 
+  /**
+   * Seed the cursor to the channel's newest existing message WITHOUT injecting
+   * it — run once on first enable when no `.discord-offset` is persisted. Fetch
+   * the single most-recent message (limit 1, no `after`) and anchor the cursor
+   * there. An empty channel is a valid anchor (cursor stays '0'; the first
+   * message posted afterward injects normally).
+   *
+   * Returns true when the anchor was successfully determined (got a message OR
+   * confirmed the channel empty) and the caller may commit `seeded`. Returns
+   * FALSE only on a fetch error — the caller leaves `seeded` false and retries
+   * next poll, so a transient error never falls through to replaying the
+   * backlog from offset 0. (Poll-interval gated, so not a tight loop.)
+   */
+  private async seedOffset(): Promise<boolean> {
+    try {
+      const recent = await this.api.getMessagesAfter(this.channelId, '0', 1);
+      if (recent.length > 0) {
+        this.offset = recent[recent.length - 1].id; // newest (ascending sort)
+        this.saveOffset();
+        this.log(`Discord inbound seeded cursor to newest message ${this.offset} (backlog skipped)`);
+      }
+      return true; // anchored (message or confirmed-empty) — safe to mark seeded
+    } catch (err) {
+      // Do NOT mark seeded — retry the seed next cycle rather than fall through
+      // and replay backlog from offset 0 on a transient error.
+      this.log(`Discord inbound seed deferred (fetch error, will retry): ${err instanceof Error ? err.message : err}`);
+      return false;
+    }
+  }
+
   private loadOffset(): void {
     const offsetFile = join(this.stateDir, this.offsetFileName);
     try {
       if (existsSync(offsetFile)) {
         const content = readFileSync(offsetFile, 'utf-8').trim();
-        // Snowflakes are decimal digit strings; reject anything else.
-        if (/^\d+$/.test(content)) this.offset = content;
+        // Snowflakes are decimal digit strings; reject anything else. A valid
+        // persisted cursor means we're already anchored — skip first-run seeding.
+        if (/^\d+$/.test(content)) {
+          this.offset = content;
+          this.seeded = true;
+        }
       }
     } catch {
       // Start from '0' if unreadable.
