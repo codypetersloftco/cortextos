@@ -570,6 +570,13 @@ export interface DiscordUser {
   username?: string;
   /** Server/display name. User-settable = spoofable; never authorize on it. */
   global_name?: string;
+  /**
+   * True iff Discord classifies this account as a bot. Set by Discord (not the
+   * message payload), so not user-forgeable. Used ONLY to keep our own outbound
+   * webhook bot's echoes from counting toward the unsolicited-contact alarm —
+   * never for authorization (a bot is never in the allowlist regardless).
+   */
+  bot?: boolean;
 }
 
 export interface DiscordMessage {

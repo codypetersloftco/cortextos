@@ -18,7 +18,7 @@ import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
 import { DiscordAPI } from '../discord/api.js';
 import { DiscordPoller } from '../discord/poller.js';
-import { parseAllowedDiscordUsers, routeDiscordInbound } from '../discord/gate.js';
+import { parseAllowedDiscordUsers, routeDiscordInbound, shouldCountDiscordRejection } from '../discord/gate.js';
 
 type LogFn = (msg: string) => void;
 
@@ -814,8 +814,15 @@ export class AgentManager {
         // Drop-log: author.id + channel.id + message.id only. Never the body,
         // never the (spoofable) display name, never the token.
         log(`Discord inbound dropped:${result.reason} author.id=${result.authorId || 'unknown'} channel=${channelId} message=${msg.id}`);
+        // Our own outbound webhook bot ("Loftco AI Agents") echoes Cody's sends
+        // back into the channel; the id-gate already drops them (a bot is never
+        // in the allowlist). Do NOT count a Discord-confirmed bot's echo toward
+        // the unsolicited-contact alarm — it fired bogus security notices. Still
+        // log the drop above. Human/non-allowed authors (bot undefined/false, or
+        // a spoofed non-boolean) still increment, so genuine alerts are preserved
+        // (shouldCountDiscordRejection is strict === true — fails toward alerting).
         const entry = this.agents.get(name);
-        if (entry) {
+        if (entry && shouldCountDiscordRejection(msg)) {
           entry.discordRejectCount = (entry.discordRejectCount ?? 0) + 1;
           if (entry.discordRejectCount >= REJECT_ALERT_THRESHOLD) {
             const now = Date.now();
