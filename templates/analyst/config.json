@@ -25,7 +25,7 @@
       "name": "usage-monitor",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Check Claude API usage: run bash \"${CTX_FRAMEWORK_ROOT}/bus/check-usage-api.sh\" --warn-7day 80 --warn-5h 90 --chat-id 724702591 2>&1. Parse the JSON output. Rules: (1) If 7-day utilization >= 80% send the orchestrator a CODE RED via Telegram immediately. (2) If 5-hour >= 90% send a warning. (3) For 7-day: check if the current utilization has crossed a new 10% increment since the last check (e.g. crossed 10%, 20%, 30%... 90%). Read the last logged 7-day value from today's memory file to compare. If a new 10% threshold was crossed, send the orchestrator a brief Telegram: '7-day usage: X% (resets <date>)'. Same logic applies to codex.utilization_5h and codex.utilization_7d fields. (4) Always log the current levels in your daily memory."
+      "prompt": "Check Claude API usage: run bash \"${CTX_FRAMEWORK_ROOT}/bus/check-usage-api.sh\" --warn-7day 80 --warn-5h 90 2>&1. The script itself sends the hard threshold alerts to Cody via CTX_TELEGRAM_CHAT_ID (7-day >= 80% CODE RED, 5-hour >= 90% warning, Codex limit/expiry) — do NOT re-send those. Then parse the JSON output and: (1) For 7-day, if utilization crossed a new 10% increment since the last check (10/20/30/.../90%), notify Cody: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID '7-day usage: X% (resets <date>)'. Read the last logged 7-day value from today's memory file to compare. Apply the same 10%-increment soft-notify to codex.utilization_5h and codex.utilization_7d. (2) Always log the current Claude + Codex levels in your daily memory."
     },
     {
       "name": "nightly-metrics",
