@@ -8,7 +8,8 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents, classifyFromMarkers } from '../../../src/hooks/hook-crash-alert';
+import { EventEmitter } from 'events';
+import { readMaxCrashesPerDay, notifyAgents, classifyFromMarkers, isEphemeralWorkerExit, readHookInput } from '../../../src/hooks/hook-crash-alert';
 import { clearEndMarkers } from '../../../src/bus/heartbeat';
 
 describe('readMaxCrashesPerDay', () => {
@@ -200,6 +201,57 @@ describe('classifyFromMarkers', () => {
     writeFileSync(join(tmp, '.restart-planned'), 'planned', 'utf-8');
     writeFileSync(join(tmp, '.user-stop'), 'stopped', 'utf-8');
     expect(classifyFromMarkers(tmp, MARKERS).endType).toBe('planned-restart');
+  });
+});
+
+describe('isEphemeralWorkerExit (marker-only gate)', () => {
+  let tmp: string;
+  const MARKER = '.cortextos-ephemeral-worker'; // mirrors WorkerProcess.EPHEMERAL_MARKER
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-ephemeral-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('true: ephemeral marker present → reclassify to worker-complete (regardless of how it exited)', () => {
+    writeFileSync(join(tmp, MARKER), 'prestage-shippers-worker 2026-06-04', 'utf-8');
+    expect(isEphemeralWorkerExit(tmp)).toBe(true);
+  });
+
+  it('false: NO ephemeral marker → persistent agent, stays crash (byte-unchanged path)', () => {
+    expect(isEphemeralWorkerExit(tmp)).toBe(false);
+  });
+
+  it('false: cwd undefined', () => {
+    expect(isEphemeralWorkerExit(undefined)).toBe(false);
+  });
+});
+
+describe('readHookInput reads the SessionEnd `reason` key (rename-regression guard)', () => {
+  // The SessionEnd stdin key is `reason`, NOT `end_reason` (verified against the
+  // raw payload). This asserts the code parses `reason` so a future rename back
+  // to a phantom key regresses loudly.
+  function withMockStdin(payload: string, run: () => Promise<unknown>): Promise<unknown> {
+    const fake = new EventEmitter() as unknown as NodeJS.ReadStream;
+    const orig = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+    Object.defineProperty(process, 'stdin', { value: fake, configurable: true });
+    const p = run();
+    (fake as unknown as EventEmitter).emit('data', Buffer.from(payload));
+    (fake as unknown as EventEmitter).emit('end');
+    return p.finally(() => Object.defineProperty(process, 'stdin', orig));
+  }
+
+  it('parses reason="other" from a real SessionEnd payload', async () => {
+    const payload = JSON.stringify({
+      session_id: 's1', transcript_path: 't', cwd: 'X',
+      hook_event_name: 'SessionEnd', reason: 'other',
+    });
+    const r = (await withMockStdin(payload, readHookInput)) as { reason?: string; cwd?: string };
+    expect(r.reason).toBe('other');
+    expect(r.cwd).toBe('X');
   });
 });
 

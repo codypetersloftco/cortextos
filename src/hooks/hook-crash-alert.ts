@@ -28,7 +28,16 @@ const QUIET_HOUR_END_LA = 7;                    // 07:00 America/Los_Angeles
 const ALWAYS_SUPPRESSED_TYPES = new Set([
   'planned-restart',
   'session-refresh',
+  // Clean completion of an ephemeral `cortextos spawn-worker` session. One-shot
+  // workers have no crash recovery and no Telegram integration by design, so a
+  // graceful exit is a normal "done", never a crash. See classifyEphemeral.
+  'worker-complete',
 ]);
+
+// Mirrors WorkerProcess.EPHEMERAL_MARKER (src/daemon/worker-process.ts). Kept as
+// a local literal so this dependency-light hook need not import the daemon module
+// (which pulls in node-pty). If you rename the marker there, rename it here too.
+const EPHEMERAL_WORKER_MARKER = '.cortextos-ephemeral-worker';
 
 // Suppressed during quiet hours only. "crash" and "daemon-crashed" are
 // deliberately NOT in either list — worth waking up for.
@@ -195,10 +204,17 @@ const MARKER_TTL_MS = 300_000; // 5 minutes
  * Read the hook's stdin JSON payload. Claude Code pipes a JSON object to
  * SessionEnd hooks containing `session_id` (the ending session's id) plus
  * other event fields. Mirrors the stdin-read in hook-context-status.ts.
- * Returns {} on any failure. The session_id is recorded in crashes.log for
- * audit; it is not used for classification.
+ * Returns {} on any failure. `session_id` is recorded in crashes.log for audit;
+ * `cwd` is used to recognize an ephemeral-worker exit (see isEphemeralWorkerExit).
+ * `reason` is Claude Code's SessionEnd reason field — logged for audit only.
+ *
+ * IMPORTANT: the SessionEnd stdin key is `reason`, NOT `end_reason` (verified
+ * against the raw payload on this box's CC version — a clean headless `-p` exit
+ * reports reason="other", NOT "prompt_input_exit"). Because `reason` is the same
+ * for clean and errored `-p` exits, it CANNOT discriminate them — so the marker,
+ * not the reason value, is the ephemeral-worker discriminator below.
  */
-async function readHookInput(): Promise<{ session_id?: string }> {
+export async function readHookInput(): Promise<{ session_id?: string; reason?: string; cwd?: string }> {
   const chunks: Buffer[] = [];
   await new Promise<void>((resolve) => {
     // Fallback so a stdin that never ends can't hang the hook. unref()'d and
@@ -264,6 +280,31 @@ export function classifyFromMarkers(
   return { endType: 'crash', reason: '' };
 }
 
+/**
+ * True when `cwd` is an ephemeral `cortextos spawn-worker` session's working dir
+ * — i.e. it carries EPHEMERAL_WORKER_MARKER (written by WorkerProcess for the
+ * life of the session). Used to reclassify a would-be `crash` as `worker-complete`.
+ *
+ * Why marker-ONLY (no reason-value check): WorkerProcess sessions are one-shot
+ * with NO crash recovery and NO Telegram integration BY DESIGN — the Telegram
+ * crash-alert is the wrong channel for them regardless of how they exit. The
+ * SessionEnd `reason` cannot help: a clean `-p` exit reports reason="other"
+ * (verified on this box), the SAME value an errored `-p` exit would report, and
+ * a HARD crash fires no SessionEnd at all — so this hook structurally cannot be
+ * the failed-worker signal. Worker FAILURES are surfaced at the layer that sees
+ * every exit (the daemon's pty.onExit → onDone → worker_failed event); see
+ * agent-manager.ts. Here we only stop the false CRASH on a normal worker exit.
+ * Persistent agents (no marker) are wholly unaffected.
+ */
+export function isEphemeralWorkerExit(cwd: string | undefined): boolean {
+  if (!cwd) return false;
+  try {
+    return existsSync(join(cwd, EPHEMERAL_WORKER_MARKER));
+  } catch {
+    return false;
+  }
+}
+
 async function main(): Promise<void> {
   const agentName = process.env.CTX_AGENT_NAME;
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
@@ -302,6 +343,17 @@ async function main(): Promise<void> {
   const classified = classifyFromMarkers(stateDir, markers);
   let endType = classified.endType;
   let reason = classified.reason;
+
+  // An ephemeral-worker exit is not an agent crash. Checked before the rate-limit
+  // reclassify so a finished `cortextos spawn-worker` session never pages — fixes
+  // the bogus `type=crash reason=none last_task=` alerts. Marker-only by design
+  // (see isEphemeralWorkerExit): the hook cannot tell a clean from a failed worker
+  // exit, and worker FAILURES are surfaced by the daemon (worker_failed event),
+  // not here. Persistent agents (no marker) keep classifying as crash.
+  if (endType === 'crash' && isEphemeralWorkerExit(hookInput.cwd)) {
+    endType = 'worker-complete';
+    reason = 'ephemeral -p worker exit';
+  }
 
   // If no marker matched but the stdout tail shows a rate-limit signature,
   // reclassify as rate-limited. Prevents the 30-minute 🚨 CRASH buzz storm
@@ -353,7 +405,12 @@ async function main(): Promise<void> {
   // FP ever slips through, two crashes.log lines sharing a session value make
   // it provable after the fact.
   const timestamp = new Date().toISOString();
-  const logLine = `${timestamp} type=${endType} reason=${reason || 'none'} session=${sessionId || 'unknown'} last_task=${lastTask}\n`;
+  // sessionend_reason (Claude Code's SessionEnd `reason` field) appended at the END
+  // for audit — distinct from the classified `reason` above. Appended (not inserted)
+  // so existing parsers/canaries matching the `type=… reason=… session=… last_task=`
+  // prefix keep working unchanged.
+  const sessionEndReason = typeof hookInput.reason === 'string' ? hookInput.reason : '';
+  const logLine = `${timestamp} type=${endType} reason=${reason || 'none'} session=${sessionId || 'unknown'} last_task=${lastTask} sessionend_reason=${sessionEndReason || 'none'}\n`;
   try {
     appendFileSync(join(logDir, 'crashes.log'), logLine);
   } catch { /* ignore */ }
