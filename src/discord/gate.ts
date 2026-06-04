@@ -67,3 +67,21 @@ export function routeDiscordInbound(
   const text = stripText(msg.content || '');
   return { inject: true, authorId, formatted: formatDiscordTextMessage(from, channelId, text) };
 }
+
+/**
+ * Should a DROPPED inbound message count toward the consecutive-reject alarm?
+ *
+ * Our own outbound webhook bot ("Loftco AI Agents") echoes Cody's Discord sends
+ * back into the channel. The id-gate already drops them (a bot is never in the
+ * allowlist), but counting those drops toward the 3-strike threshold fired a
+ * bogus "=== SECURITY NOTICE === ... rejected 3 consecutive messages" alert.
+ *
+ * Security-NEUTRAL: this only affects the noise alarm, never authorization.
+ * STRICT `=== true` so it FAILS TOWARD ALERTING — only a Discord-confirmed bot
+ * is suppressed; undefined/false = human, and any spoofed non-boolean truthy
+ * value still counts, so a forged flag can never hide a real unsolicited-contact
+ * alert. The `bot` field is set by Discord (not the message payload).
+ */
+export function shouldCountDiscordRejection(msg: DiscordMessage): boolean {
+  return msg.author?.bot !== true;
+}
