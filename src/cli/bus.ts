@@ -24,6 +24,7 @@ import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { postWebhook } from '../discord/api.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -1015,6 +1016,61 @@ busCommand
         } catch { /* non-fatal */ }
       }
 
+      console.log('Message sent');
+    } catch (err: any) {
+      console.error(`Failed to send: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('send-discord')
+  .description('Send a message to the org Discord channel via the incoming webhook (DISCORD_WEBHOOK_URL)')
+  .argument('<message>', 'Message text')
+  .action(async (message: string) => {
+    // Normalize literal \n / \t (same codex-single-quote issue as send-telegram).
+    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+
+    // Resolve the webhook URL: org secrets.env first, then process.env.
+    // The webhook is a self-authenticating outbound credential — single
+    // channel == single webhook, so no channel argument is needed. The bot
+    // token (DISCORD_BOT_TOKEN) is INBOUND-only and never used here.
+    const env = resolveEnv();
+    let webhookUrl = '';
+    const projectRoot = env.projectRoot || env.frameworkRoot;
+    if (projectRoot && env.org) {
+      const { readFileSync, existsSync } = require('fs');
+      const { join } = require('path');
+      const secretsFile = join(projectRoot, 'orgs', env.org, 'secrets.env');
+      if (existsSync(secretsFile)) {
+        const content = readFileSync(secretsFile, 'utf-8');
+        const match = content.match(/^DISCORD_WEBHOOK_URL=(.+)$/m);
+        if (match && match[1].trim()) {
+          let v = match[1].trim();
+          if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+          webhookUrl = v;
+        }
+      }
+    }
+    if (!webhookUrl) webhookUrl = process.env.DISCORD_WEBHOOK_URL || '';
+
+    if (!webhookUrl) {
+      console.error('Error: DISCORD_WEBHOOK_URL not configured. Set it in orgs/<org>/secrets.env to enable Discord.');
+      process.exit(1);
+    }
+
+    try {
+      const chunks = await postWebhook(webhookUrl, message);
+      // Log outbound (channel id 'discord' — the webhook is the single channel)
+      // and emit an activity event, mirroring send-telegram.
+      if (env.agentName && env.ctxRoot) {
+        logOutboundMessage(env.ctxRoot, env.agentName, 'discord', message, 0, { parseMode: 'none' });
+        try {
+          const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+          const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
+          logEvent(paths, env.agentName, env.org, 'message', 'discord_sent', 'info', JSON.stringify({ channel: 'discord', chunks, preview }));
+        } catch { /* non-fatal */ }
+      }
       console.log('Message sent');
     } catch (err: any) {
       console.error(`Failed to send: ${err.message || err}`);

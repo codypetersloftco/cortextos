@@ -16,6 +16,9 @@ import { collectTelegramCommands, registerTelegramCommands } from '../bus/metric
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
+import { DiscordAPI } from '../discord/api.js';
+import { DiscordPoller } from '../discord/poller.js';
+import { parseAllowedDiscordUsers, routeDiscordInbound } from '../discord/gate.js';
 
 type LogFn = (msg: string) => void;
 
@@ -23,7 +26,7 @@ type LogFn = (msg: string) => void;
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; telegramRejectCount?: number; telegramLastRejectAlertAt?: number; discordPoller?: DiscordPoller; discordRejectCount?: number; discordLastRejectAlertAt?: number }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
   private cronSchedulers: Map<string, CronScheduler> = new Map();
@@ -704,6 +707,172 @@ export class AgentManager {
       // operator pain. Non-orchestrator agents skip this entirely.
       await this.maybeStartActivityChannelPoller(name, org, agentDir, log);
     }
+
+    // Discord inbound poller (orchestrator-only). Intentionally OUTSIDE the
+    // Telegram if-block above: Discord is the BACKUP channel, so it must
+    // start even when Telegram is unconfigured or unreachable (the exact
+    // outage this feature exists to cover). The method gates on orchestrator
+    // identity + presence of Discord config, and fails closed on auth.
+    await this.maybeStartDiscordInboundPoller(name, org, agentDir, log);
+  }
+
+  /**
+   * If this agent is the org's orchestrator AND the org has Discord inbound
+   * configured (DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID + DISCORD_ALLOWED_USER
+   * in orgs/<org>/secrets.env), start a DiscordPoller that REST-polls the one
+   * dedicated channel and injects Cody's messages into the orchestrator's
+   * inbox the same way Telegram does. Mirrors maybeStartActivityChannelPoller
+   * (orchestrator-only, silent no-op otherwise).
+   *
+   * SECURITY (Sentinel inbound-audit, build-to-letter):
+   *   - AUTH on author.id (snowflake) ONLY; never username/global_name.
+   *   - HARD Cody-only floor enforced IN CODE at INGEST (before the sink).
+   *   - Inbound body is UNTRUSTED data ([USER:] wrapper + fenced body).
+   *   - FAIL-CLOSED: token set but DISCORD_ALLOWED_USER missing/empty/
+   *     non-numeric => refuse ALL inbound (poller does not start).
+   *   - Drop-log carries author.id + channel.id + message.id only; never the
+   *     body, never the token, never the (spoofable) display name.
+   */
+  private async maybeStartDiscordInboundPoller(
+    name: string,
+    org: string | undefined,
+    agentDir: string,
+    log: LogFn,
+  ): Promise<void> {
+    if (!org) return;
+    const orgDir = join(this.frameworkRoot, 'orgs', org);
+
+    // Only the org's orchestrator runs the Discord inbound poller.
+    let orchestratorName: string | undefined;
+    try {
+      const contextJson = stripBom(readFileSync(join(orgDir, 'context.json'), 'utf-8'));
+      orchestratorName = JSON.parse(contextJson).orchestrator;
+    } catch {
+      return; // No context.json or unreadable — skip
+    }
+    if (!orchestratorName || orchestratorName !== name) return;
+
+    // Read Discord inbound config from orgs/<org>/secrets.env (auth credentials
+    // live in secrets.env, never checked-in config — keeps them out of the repo).
+    const secretsPath = join(orgDir, 'secrets.env');
+    let botToken: string | undefined;
+    let channelId: string | undefined;
+    let allowedUserRaw: string | undefined;
+    try {
+      const content = stripBom(readFileSync(secretsPath, 'utf-8'));
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx <= 0) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        let value = trimmed.slice(eqIdx + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        if (key === 'DISCORD_BOT_TOKEN') botToken = value;
+        if (key === 'DISCORD_CHANNEL_ID') channelId = value;
+        if (key === 'DISCORD_ALLOWED_USER') allowedUserRaw = value;
+      }
+    } catch {
+      return; // secrets.env absent — silent no-op (Discord inbound just not configured)
+    }
+
+    // Not configured at all — silent no-op (no token => feature simply off).
+    if (!botToken) return;
+
+    // FAIL-CLOSED: a bot token without a channel id is unusable.
+    if (!channelId || !/^\d+$/.test(channelId)) {
+      log('SECURITY: DISCORD_BOT_TOKEN is set but DISCORD_CHANNEL_ID is missing or non-numeric. Discord inbound DISABLED (fail-closed). Set a numeric guild channel id in secrets.env.');
+      return;
+    }
+
+    // FAIL-CLOSED: token set but allowlist missing/empty/non-numeric => refuse
+    // ALL inbound (mirrors Telegram BOT_TOKEN-set + ALLOWED_USER-missing).
+    // parseAllowedDiscordUsers comma-splits, numeric-validates, Cody FIRST
+    // (index 0 = the hard floor) and returns [] on any malformed input.
+    const allowedIds = parseAllowedDiscordUsers(allowedUserRaw);
+    if (allowedIds.length === 0) {
+      log('SECURITY: DISCORD_BOT_TOKEN is set but DISCORD_ALLOWED_USER is missing/empty/non-numeric. Discord inbound DISABLED (fail-closed) — refusing all inbound until a numeric Discord user id is whitelisted in secrets.env.');
+      return;
+    }
+
+    const api = new DiscordAPI(botToken);
+    const stateDir = join(this.ctxRoot, 'state', name);
+    const poller = new DiscordPoller(api, channelId, stateDir, 2000, log);
+
+    const REJECT_ALERT_THRESHOLD = 3;
+    const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+    const allowedSet = new Set(allowedIds);
+
+    poller.onMessage((msg) => {
+      // ---- AUTH GATE AT INGEST (pure trust boundary, before the sink) ----
+      // routeDiscordInbound authorizes on author.id ONLY, default-DENY, and an
+      // empty allowedSet drops everything (fail-closed). See src/discord/gate.ts.
+      const result = routeDiscordInbound(msg, allowedSet, channelId!, stripControlChars);
+      if (!result.inject) {
+        // Drop-log: author.id + channel.id + message.id only. Never the body,
+        // never the (spoofable) display name, never the token.
+        log(`Discord inbound dropped:${result.reason} author.id=${result.authorId || 'unknown'} channel=${channelId} message=${msg.id}`);
+        const entry = this.agents.get(name);
+        if (entry) {
+          entry.discordRejectCount = (entry.discordRejectCount ?? 0) + 1;
+          if (entry.discordRejectCount >= REJECT_ALERT_THRESHOLD) {
+            const now = Date.now();
+            const lastAlert = entry.discordLastRejectAlertAt ?? 0;
+            if (now - lastAlert > REJECT_ALERT_COOLDOWN_MS) {
+              entry.discordLastRejectAlertAt = now;
+              // Alert via orchestrator-session injection — Telegram-independent
+              // by design (Telegram may be the very thing that is down). Surfaces
+              // live to boss; analyst sees it in the daemon log / via boss relay.
+              entry.checker.queueTelegramMessage(
+                `=== SECURITY NOTICE ===\n\`\`\`\nDiscord inbound rejected ${entry.discordRejectCount} consecutive messages from non-allowed author id(s) on channel ${channelId}. Last author.id: ${result.authorId || 'unknown'}. If this is a legitimate new user, add their numeric Discord id to DISCORD_ALLOWED_USER in secrets.env; otherwise this may be unsolicited contact.\n\`\`\`\n\n`,
+              );
+            }
+          }
+        }
+        return;
+      }
+
+      // Passed the id-gate — reset the consecutive-reject counter.
+      const agentEntry = this.agents.get(name);
+      if (agentEntry) agentEntry.discordRejectCount = 0;
+
+      const entry = this.agents.get(name);
+      if (!entry) return;
+      if (entry.checker.isDuplicate(result.formatted!)) {
+        log('Duplicate Discord message suppressed');
+        return;
+      }
+      entry.checker.queueTelegramMessage(result.formatted!);
+    });
+
+    // Lightweight restart wrapper: REST poll has no getUpdates 409 lock, but
+    // the loop can still exit on an unexpected throw — restart after 30s
+    // unless intentionally stopped. Bounded the same way as Telegram's.
+    const startDiscordPollerWithRestart = async () => {
+      while (true) {
+        if (!this.agents.has(name)) return;
+        try {
+          await poller.start();
+        } catch (err) {
+          log(`Discord inbound poller threw (will not restart): ${err}`);
+          return;
+        }
+        if (poller.lastExitReason === 'stopped-externally') return;
+        if (!this.agents.has(name)) return;
+        log(`Discord inbound poller exited unexpectedly. Sleeping 30s then restarting.`);
+        await new Promise(r => setTimeout(r, 30_000));
+      }
+    };
+    startDiscordPollerWithRestart().catch((err) => {
+      log(`Discord inbound poller wrapper crashed: ${err}`);
+    });
+
+    const entry = this.agents.get(name);
+    if (entry) entry.discordPoller = poller;
+
+    log(`Discord inbound poller started (channel ****${channelId.slice(-4)}, allowed_user: enabled, fail-closed)`);
   }
 
   /**
@@ -840,6 +1009,7 @@ export class AgentManager {
 
     if (entry.poller) entry.poller.stop();
     if (entry.activityPoller) entry.activityPoller.stop();
+    if (entry.discordPoller) entry.discordPoller.stop();
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);

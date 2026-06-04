@@ -559,6 +559,31 @@ export interface TelegramVideoNote {
   duration: number;
 }
 
+// Discord Types (inbound REST poller + outbound webhook).
+// Mirrors the Telegram message shape. Auth is on author.id (a snowflake
+// string) ONLY — never username/global_name (user-settable = spoofable).
+
+export interface DiscordUser {
+  /** Snowflake user id — the ONLY field the auth gate trusts. */
+  id: string;
+  /** Account username. Display only; never used for authorization. */
+  username?: string;
+  /** Server/display name. User-settable = spoofable; never authorize on it. */
+  global_name?: string;
+}
+
+export interface DiscordMessage {
+  /** Snowflake message id — monotonic; used as the poll offset cursor. */
+  id: string;
+  channel_id: string;
+  /** Message author. Authorization keys off author.id only. */
+  author: DiscordUser;
+  /** Message body. Returned via channel perms on REST (no privileged intent). */
+  content: string;
+  /** ISO8601 timestamp. */
+  timestamp?: string;
+}
+
 // Task Management Report Types
 
 export interface StaleTaskReport {
