@@ -226,16 +226,29 @@ if [[ "$FORCE" == "false" && -f "$CACHE_FILE" ]]; then
   fi
 fi
 
-# ── Read OAuth token from Keychain ──────────────────────────────────────────
-if ! command -v security &>/dev/null; then
-  echo '{"error":"macOS Keychain (security) not available"}' >&2
-  exit 1
-fi
-
-RAW_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
-if [[ -z "$RAW_CREDS" ]]; then
-  echo '{"error":"Claude Code credentials not found in Keychain"}' >&2
-  exit 1
+# ── Read OAuth token (macOS: Keychain; Windows/Linux: ~/.claude/.credentials.json) ──
+# Claude Code stores credentials in the macOS Keychain on macOS, but in a plain
+# JSON file (~/.claude/.credentials.json) on Windows/Linux. Both carry the same
+# {"claudeAiOauth":{"accessToken":...}} shape, so only the acquisition differs —
+# the parse below is shared. Gate on `security` (present only on macOS) so the
+# macOS path is unchanged.
+if command -v security &>/dev/null; then
+  RAW_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+  if [[ -z "$RAW_CREDS" ]]; then
+    echo '{"error":"Claude Code credentials not found in Keychain"}' >&2
+    exit 1
+  fi
+else
+  CREDS_FILE="${HOME}/.claude/.credentials.json"
+  if [[ ! -f "$CREDS_FILE" ]]; then
+    echo '{"error":"Claude Code credentials not found (no macOS Keychain; '"${CREDS_FILE}"' missing)"}' >&2
+    exit 1
+  fi
+  RAW_CREDS=$(cat "$CREDS_FILE" 2>/dev/null || true)
+  if [[ -z "$RAW_CREDS" ]]; then
+    echo '{"error":"Could not read '"${CREDS_FILE}"'"}' >&2
+    exit 1
+  fi
 fi
 
 ACCESS_TOKEN=$(echo "$RAW_CREDS" | python3 -c "
