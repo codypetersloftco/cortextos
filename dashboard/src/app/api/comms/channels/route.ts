@@ -91,7 +91,13 @@ export async function GET(request: NextRequest) {
             try {
               const raw = JSON.parse(line);
               if (!raw.timestamp) continue;
-              const msgId = `tg-${isInbound ? 'in' : 'out'}-${agent}-${raw.message_id || raw.timestamp}`;
+              // Honor the entry's own bus id when present (dashboard chat
+              // messages carry one) so the dedup below collapses it against
+              // any bus/history copy. Genuine Telegram entries (message_id
+              // only) get a synthesized tg-* id. Mirrors channel/[pair]/route.ts.
+              const msgId = (typeof raw.id === 'string' && raw.id)
+                ? raw.id
+                : `tg-${isInbound ? 'in' : 'out'}-${agent}-${raw.message_id || raw.timestamp}`;
               const fromName = isInbound ? identity.canonicalUser : agent;
               const toName = isInbound ? agent : identity.canonicalUser;
               const candidate: BusMessage = {

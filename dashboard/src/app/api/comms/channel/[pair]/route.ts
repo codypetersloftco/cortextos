@@ -149,7 +149,17 @@ export async function GET(
             try {
               const raw = JSON.parse(line);
               if (!raw.timestamp) continue;
-              const msgId = `tg-${isInbound ? 'in' : 'out'}-${agent}-${raw.message_id || raw.timestamp}`;
+              // Dashboard chat-bar messages are dual-written by
+              // /api/messages/send: a bus inbox file AND an inbound-messages
+              // entry that BOTH carry the same bus `id`. The inbox scan above
+              // already emitted the bus copy, so honor the entry's own bus id
+              // here — that makes `seen` dedup the log copy against it. Only
+              // genuine Telegram entries (no bus id, just a message_id) get a
+              // synthesized tg-* id. The bus id is the stable logical-message
+              // key shared across both sources.
+              const msgId = (typeof raw.id === 'string' && raw.id)
+                ? raw.id
+                : `tg-${isInbound ? 'in' : 'out'}-${agent}-${raw.message_id || raw.timestamp}`;
               if (seen.has(msgId)) continue;
 
               // Resolve both sides through the identity layer so inbound

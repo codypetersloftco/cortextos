@@ -192,6 +192,65 @@ describe('GET /api/comms/channel/[pair]', () => {
     );
     expect(res2.status).toBe(400);
   });
+
+  // A dashboard chat-bar message is DUAL-WRITTEN by /api/messages/send:
+  // once as a bus inbox file, and once appended to inbound-messages.jsonl
+  // (same bus id, source:'dashboard', NO message_id). The channel route's
+  // Telegram-log merge historically discarded the entry's real bus id and
+  // synthesized `tg-in-<agent>-<message_id||timestamp>`, so the two copies
+  // had different ids and BOTH rendered — a visible duplicate. The merge
+  // must honor the entry's own bus id so it dedups against the inbox copy.
+  it('does not duplicate a dashboard message present in BOTH the inbox and inbound-messages.jsonl', async () => {
+    const agent = 'boris';
+    const busId = '1780000000000-james-abcde';
+    const ts = '2026-04-15T09:00:00.000Z';
+
+    // (1) bus inbox file (what /api/messages/send writes to inbox/<agent>/)
+    const inboxDir = path.join(rootTmp, 'inbox', agent);
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(inboxDir, '2-1780000000000-from-james-abcde.json'),
+      JSON.stringify({ id: busId, from: 'james', to: agent, priority: 'normal', timestamp: ts, text: 'hi from dashboard', reply_to: null }),
+    );
+    // (2) the inbound-messages.jsonl entry it ALSO appends (same id, source:dashboard, no message_id)
+    const logDir = path.join(rootTmp, 'logs', agent);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, 'inbound-messages.jsonl'),
+      JSON.stringify({ id: busId, timestamp: ts, agent, direction: 'inbound', type: 'text', text: 'hi from dashboard', from_name: 'james', source: 'dashboard' }) + '\n',
+    );
+
+    const res = await channel.GET(
+      makeRequest('/api/comms/channel/boris--james'),
+      { params: Promise.resolve({ pair: 'boris--james' }) },
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toHaveLength(1);
+    expect(data[0].text).toBe('hi from dashboard');
+    expect(data[0].id).toBe(busId);
+  });
+
+  // Regression guard: a genuine Telegram inbound (message_id, NO bus id,
+  // no inbox file) must still render exactly once via the synthesized tg id.
+  it('still renders a genuine Telegram inbound message exactly once', async () => {
+    const agent = 'boris';
+    const logDir = path.join(rootTmp, 'logs', agent);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, 'inbound-messages.jsonl'),
+      JSON.stringify({ message_id: '42', from: '724702591', from_name: 'Cody', chat_id: '724702591', text: 'tg hello', timestamp: '2026-04-15T09:05:00.000Z', agent }) + '\n',
+    );
+
+    const res = await channel.GET(
+      makeRequest('/api/comms/channel/boris--james'),
+      { params: Promise.resolve({ pair: 'boris--james' }) },
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toHaveLength(1);
+    expect(data[0].text).toBe('tg hello');
+  });
 });
 
 // ---------------------------------------------------------------------------
