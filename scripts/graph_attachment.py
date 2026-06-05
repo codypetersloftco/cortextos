@@ -175,7 +175,10 @@ def find_messages(token: str, mailbox: str, subject: str | None, frm: str | None
 def list_attachments(token: str, mailbox: str, message_id: str) -> list[dict]:
     resp = _graph_get(
         token, f"{GRAPH}/users/{mailbox}/messages/{message_id}/attachments",
-        params={"$select": "id,name,contentType,size,@odata.type"},
+        # NOTE: do NOT put @odata.type in $select — Graph rejects it ("not valid in a
+        # $select expression"). It is returned automatically on every attachment, so the
+        # fileAttachment filter below still works without selecting it.
+        params={"$select": "id,name,contentType,size"},
     )
     return resp.json().get("value", [])
 
