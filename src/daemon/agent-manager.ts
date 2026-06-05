@@ -10,6 +10,7 @@ import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
+import { surfaceWorkerExit } from './worker-exit-surface.js';
 import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -1179,7 +1180,13 @@ export class AgentManager {
 
     this.workers.set(name, worker);
 
-    worker.onDone((workerName) => {
+    worker.onDone((workerName, exitCode) => {
+      // Surface a FAILED exit (non-zero) before cleanup — fires at pty.onExit, so it
+      // catches BOTH a graceful failure and a hard crash. Emits a durable
+      // worker_failed event + best-effort parent message; clean exits stay silent.
+      // Previously the exit code was discarded here, so failed workers vanished with
+      // no human-visible signal. Runs BEFORE the delete so surfacing never races it.
+      surfaceWorkerExit(this.instanceId, this.org, workerName, exitCode, parent);
       // Auto-remove finished workers after a short delay so list-workers
       // can still show the final status briefly before cleanup
       setTimeout(() => {
