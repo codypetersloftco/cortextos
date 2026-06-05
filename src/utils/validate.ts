@@ -169,7 +169,7 @@ export function sanitizeForPtyInjection(input: string): string {
     .replace(/\r\n?/g, '\n')
     .replace(/`{3,}/g, '``')
     .replace(
-      /^([ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]*)(={3,}\s*(?:AGENT MESSAGE|TELEGRAM)\b|Reply using:\s*cortextos\s+bus)/gim,
+      /^([ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]*)(={3,}\s*(?:AGENT MESSAGE|TELEGRAM|DISCORD)\b|Reply using:\s*cortextos\s+bus)/gim,
       '$1[quoted] $2',
     );
 }
