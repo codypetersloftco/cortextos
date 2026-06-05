@@ -27,16 +27,6 @@ vi.mock('../../../src/utils/atomic.js', () => ({
   atomicWriteSync: atomicWriteSyncMock,
 }));
 
-vi.mock('node-pty', () => ({
-  spawn: vi.fn().mockReturnValue({
-    pid: 88,
-    write: vi.fn(),
-    onData: vi.fn(),
-    onExit: vi.fn(),
-    kill: vi.fn(),
-  }),
-}));
-
 const requestMock = vi.fn();
 const notifyMock = vi.fn();
 const closeMock = vi.fn();
@@ -44,8 +34,8 @@ const respondErrorMock = vi.fn();
 const logEventMock = vi.fn();
 let messageHandler: ((message: unknown) => void) | null = null;
 
-vi.mock('../../../src/utils/ws-unix-client.js', () => ({
-  WsUnixJsonRpcClient: vi.fn().mockImplementation(function WsUnixJsonRpcClient() {
+vi.mock('../../../src/utils/stdio-json-rpc-client.js', () => ({
+  StdioJsonRpcClient: vi.fn().mockImplementation(function StdioJsonRpcClient() {
     return {
       connect: vi.fn().mockResolvedValue(undefined),
       close: closeMock,
@@ -91,28 +81,47 @@ beforeEach(() => {
   messageHandler = null;
 });
 
-describe('CodexAppServerPTY socket path policy', () => {
-  it('uses codex.sock in the agent state dir by default', () => {
+describe('CodexAppServerPTY spawn command (stdio transport, codex >= 0.98)', () => {
+  type SpawnCmd = { file: string; args: string[]; shell: boolean };
+  const buildCmd = (pty: InstanceType<typeof CodexAppServerPTY>): SpawnCmd =>
+    (pty as unknown as { buildSpawnCommand(): SpawnCmd }).buildSpawnCommand();
+
+  it('spawns `node <codex.js> app-server` with no --listen and no --enable goals when the entrypoint resolves', () => {
+    // existsSync true → resolveCodexEntrypoint finds @openai/codex/bin/codex.js
+    fsMocks.existsSync.mockReturnValue(true);
     const pty = new CodexAppServerPTY(mockEnv, {});
-    expect((pty as unknown as { _socketPath: string })._socketPath).toBe('/tmp/ctx/state/codex-app-agent/codex.sock');
-    expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('unix://./codex.sock');
+    const cmd = buildCmd(pty);
+    expect(cmd.file).toBe(process.execPath);
+    expect(cmd.args[cmd.args.length - 1]).toBe('app-server');
+    expect(cmd.args.some((a) => a.endsWith('codex.js'))).toBe(true);
+    expect(cmd.args).not.toContain('--listen');
+    expect(cmd.args).not.toContain('goals');
+    expect(cmd.shell).toBe(false);
   });
 
-  it('falls back to /tmp/cas-*.sock when the state socket path is too long', () => {
-    const longEnv = {
-      ...mockEnv,
-      ctxRoot: `/tmp/${'x'.repeat(120)}`,
-    };
-    const pty = new CodexAppServerPTY(longEnv, {});
-    const socketPath = (pty as unknown as { _socketPath: string })._socketPath;
-    expect(socketPath).toMatch(/\/cas-[a-f0-9]{8}\.sock$/);
-    expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
-    expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe('/tmp');
-    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
-      expect.stringContaining('codex-app-server-socket.json'),
-      expect.stringContaining('"fallback": true'),
-      'utf-8',
-    );
+  it('passes the configured model as a `-c model=` override', () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    const pty = new CodexAppServerPTY(mockEnv, { model: 'gpt-5.5' });
+    const cmd = buildCmd(pty);
+    const ci = cmd.args.indexOf('-c');
+    expect(ci).toBeGreaterThanOrEqual(0);
+    expect(cmd.args[ci + 1]).toBe('model="gpt-5.5"');
+  });
+
+  it('omits the model override when no model is configured', () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    expect(buildCmd(pty).args).not.toContain('-c');
+  });
+
+  it('falls back to the platform codex binary (shell on win32) when codex.js is not found', () => {
+    fsMocks.existsSync.mockReturnValue(false);
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    const cmd = buildCmd(pty);
+    expect(cmd.file).not.toBe(process.execPath);
+    expect(cmd.file).toMatch(/^codex/);
+    expect(cmd.args).toEqual(['app-server']);
+    expect(cmd.shell).toBe(process.platform === 'win32');
   });
 });
 
@@ -127,106 +136,6 @@ describe('CodexAppServerPTY command mapping', () => {
     };
     return pty;
   }
-
-  it('maps /goal to thread/goal/get', async () => {
-    requestMock.mockResolvedValue({ result: { goal: null } });
-    const pty = makeReadyPty();
-    pty.write('/goal');
-    pty.write('\r');
-    await Promise.resolve();
-    expect(requestMock).toHaveBeenCalledWith('thread/goal/get', { threadId: 'thread-1' });
-    expect(pty.getOutputBuffer().getRecent()).toContain('[goal] none set');
-  });
-
-  it('maps Telegram-delivered /goal with bot suffix to native goal get', async () => {
-    requestMock.mockResolvedValue({ result: { goal: null } });
-    const pty = makeReadyPty();
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
-[Recent conversation:]
-[user]: prior
-\`\`\`
-old fenced text
-\`\`\`
-/goal@codex_app_server_test_bot
-[Your last message: "previous"]
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
-`);
-    pty.write('\r');
-    await Promise.resolve();
-    expect(requestMock).toHaveBeenCalledWith('thread/goal/get', { threadId: 'thread-1' });
-    expect(requestMock).not.toHaveBeenCalledWith('turn/start', expect.anything());
-    expect(pty.getOutputBuffer().getRecent()).toContain('[goal] none set');
-  });
-
-  it('maps Telegram-delivered /goal set and clear variants without starting a turn', async () => {
-    requestMock
-      .mockResolvedValueOnce({ result: { goal: { status: 'active' } } })
-      .mockResolvedValueOnce({ result: { cleared: true } });
-    const pty = makeReadyPty();
-
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
-/goal@codex_app_server_test_bot Ship native slash routing
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
-`);
-    pty.write('\r');
-    await Promise.resolve();
-
-    pty.write(`=== TELEGRAM from [USER: James] (chat_id:7940429114) ===
-/goal clear
-Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
-`);
-    pty.write('\r');
-    await Promise.resolve();
-
-    expect(requestMock).toHaveBeenNthCalledWith(1, 'thread/goal/set', {
-      threadId: 'thread-1',
-      objective: 'Ship native slash routing',
-    });
-    expect(requestMock).toHaveBeenNthCalledWith(2, 'thread/goal/clear', { threadId: 'thread-1' });
-    expect(requestMock).not.toHaveBeenCalledWith('turn/start', expect.anything());
-  });
-
-  it('maps /goal clear to thread/goal/clear', async () => {
-    requestMock.mockResolvedValue({ result: { cleared: true } });
-    const pty = makeReadyPty();
-    pty.write('/goal clear');
-    pty.write('\r');
-    await Promise.resolve();
-    expect(requestMock).toHaveBeenCalledWith('thread/goal/clear', { threadId: 'thread-1' });
-  });
-
-  it('mirrors /goal get reply to Telegram when handle is bound', async () => {
-    requestMock.mockResolvedValue({ result: { goal: null } });
-    const pty = makeReadyPty();
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
-    pty.write('/goal');
-    pty.write('\r');
-    await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] none set', undefined, { parseMode: null });
-  });
-
-  it('mirrors /goal set reply to Telegram when handle is bound', async () => {
-    requestMock.mockResolvedValue({ result: { goal: { status: 'active' } } });
-    const pty = makeReadyPty();
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
-    pty.write('/goal Ship native slash routing');
-    pty.write('\r');
-    await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] active: Ship native slash routing', undefined, { parseMode: null });
-  });
-
-  it('mirrors /goal clear reply to Telegram when handle is bound', async () => {
-    requestMock.mockResolvedValue({ result: { cleared: true } });
-    const pty = makeReadyPty();
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    pty.setTelegramHandle({ sendMessage } as unknown as Parameters<typeof pty.setTelegramHandle>[0], '7940429114');
-    pty.write('/goal clear');
-    pty.write('\r');
-    await Promise.resolve();
-    expect(sendMessage).toHaveBeenCalledWith('7940429114', '[goal] cleared', undefined, { parseMode: null });
-  });
 
   it('mirrors unknown $skill error to Telegram when handle is bound', async () => {
     requestMock.mockResolvedValue({ result: { data: [{ cwd: '/tmp', skills: [{ name: 'imagegen', path: '/skill.md', enabled: true }] }] } });
@@ -352,14 +261,19 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     });
   });
 
-  it('preserves /goal in the local goal handler (does not rewrite to skill)', async () => {
-    requestMock.mockResolvedValue({ result: { goal: null } });
+  it('routes /goal to a skill lookup now that the goals feature is removed', async () => {
+    // codex 0.98 dropped thread/goal/*; /goal is no longer a local command and
+    // falls through to the generic slash → skill rewrite like any other slash.
+    requestMock.mockResolvedValue({ result: { data: [] } });
     const pty = makeReadyPty();
     pty.write('/goal');
     pty.write('\r');
     await Promise.resolve();
-    expect(requestMock).toHaveBeenCalledWith('thread/goal/get', { threadId: 'thread-1' });
-    expect(requestMock).not.toHaveBeenCalledWith('skills/list', expect.anything());
+    expect(requestMock).toHaveBeenCalledWith('skills/list', {
+      cwds: ['/tmp/fw/orgs/acme/agents/codex-app-agent'],
+      forceReload: false,
+    });
+    expect(requestMock).not.toHaveBeenCalledWith('thread/goal/get', expect.anything());
   });
 
   it('replies with [skill] unknown for an unknown slash command', async () => {
@@ -796,7 +710,6 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { features: { goals: true } },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
@@ -826,7 +739,6 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { features: { goals: true } },
       excludeTurns: true,
       persistExtendedHistory: true,
     });
@@ -850,7 +762,6 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { features: { goals: true } },
       excludeTurns: true,
       persistExtendedHistory: true,
     });
@@ -907,6 +818,9 @@ describe('CodexAppServerPTY event handling', () => {
 
   it('registers a message handler when connecting RPC', async () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
+    // connectRpc wires the StdioJsonRpcClient (mocked) to the spawned child's
+    // stdin/stdout; provide a truthy stub child so the guard passes.
+    (pty as unknown as { _child: { stdin: unknown; stdout: unknown } })._child = { stdin: {}, stdout: {} };
     await (pty as unknown as { connectRpc(): Promise<void> }).connectRpc();
     expect(messageHandler).not.toBeNull();
   });
