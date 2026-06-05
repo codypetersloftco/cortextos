@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import { randomBytes } from 'crypto';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
@@ -80,6 +80,31 @@ const TURN_PERMISSION_OVERRIDES = {
 const SOCKET_BASENAME = 'codex.sock';
 const SOCKET_PATH_WARN_BYTES = 100;
 const BOOTSTRAP_PATTERN = '[codex-app-server] ready';
+
+/**
+ * Resolve the codex CLI binary name to spawn. Mirrors AgentPTY.getBinaryName().
+ *
+ * On Windows, node-pty/ConPTY's CreateProcess CANNOT launch a bare npm-shim name
+ * like `codex` (the extension-less shim is a shell script) — it fails with
+ * "Cannot create process, error code: 2" before the app-server ever boots, which
+ * is exactly why codex-app-server never started on Windows. Probe PATH for the
+ * real executable extension (`.exe`, then `.cmd`) and return that. On non-Windows
+ * the bare `codex` is correct.
+ */
+export function resolveCodexBinary(): string {
+  if (platform() !== 'win32') return 'codex';
+  const pathDirs = (process.env.PATH || '').split(';').filter(Boolean);
+  for (const ext of ['.exe', '.cmd']) {
+    for (const dir of pathDirs) {
+      if (existsSync(join(dir, `codex${ext}`))) {
+        return `codex${ext}`;
+      }
+    }
+  }
+  // Neither found on PATH — fall back to `.cmd` (the shim npm installs on Windows)
+  // so node-pty surfaces a recognizable filename if it is genuinely missing.
+  return 'codex.cmd';
+}
 
 const SLASH_REWRITE_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 const LOCAL_SLASH_COMMANDS = new Set(['goal']);
@@ -419,7 +444,7 @@ export class CodexAppServerPTY {
       }
 
       const spawnFn = this._spawnFn!;
-      const pty = spawnFn('codex', [
+      const pty = spawnFn(resolveCodexBinary(), [
         'app-server',
         '--enable', 'goals',
         '--listen', this._socketListenArg,
