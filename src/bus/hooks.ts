@@ -316,19 +316,23 @@ function emitHookBusEvent(name: HookEmitName, meta: Record<string, unknown>): vo
     // windowsHide:true preserved from our local fix — prevents focus-stealing
     // cmd windows on Win11.
     const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+    // CH3: hook-telemetry is an ON-BEHALF bus write (hook dispatcher, not the agent's
+    // live main loop). CTX_SUPPRESS_LAST_SEEN=1 keeps the cli/bus.ts preAction from
+    // refreshing last_seen on it — a hook firing is not proof the main work-loop is alive.
+    const suppressEnv = { ...process.env, CTX_SUPPRESS_LAST_SEEN: '1' };
     if (frameworkRoot) {
       const cliPath = join(frameworkRoot, 'dist', 'cli.js');
       execFile(
         process.execPath,
         [cliPath, 'bus', 'log-event', 'action', name, 'info', '--meta', JSON.stringify(meta)],
-        { timeout: 5_000, windowsHide: true },
+        { timeout: 5_000, windowsHide: true, env: suppressEnv },
         () => { /* fire-and-forget */ },
       );
     } else {
       execFile(
         'cortextos',
         ['bus', 'log-event', 'action', name, 'info', '--meta', JSON.stringify(meta)],
-        { timeout: 5_000, windowsHide: true },
+        { timeout: 5_000, windowsHide: true, env: suppressEnv },
         () => { /* fire-and-forget */ },
       );
     }

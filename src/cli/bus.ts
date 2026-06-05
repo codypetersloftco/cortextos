@@ -7,7 +7,7 @@ import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
-import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { updateHeartbeat, readAllHeartbeats, touchLastSeen, shouldRefreshLastSeen } from '../bus/heartbeat.js';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
@@ -68,6 +68,24 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
 
 export const busCommand = new Command('bus')
   .description('Bus commands for agent messaging, tasks, and events');
+
+// CH3: refresh last_seen on any SESSION-ORIGIN bus WRITE so an agent actively
+// working via the bus (between heartbeat-cron fires) is not falsely flagged stale
+// (the inverse of the crash-alert false-positive). Write-ops ONLY (reads excluded).
+// Gated on CTX_SUPPRESS_LAST_SEEN, which non-live / on-behalf CLI shell-outs set
+// (crash-alert teardown notifyAgents + hook-telemetry emitHookBusEvent) so a
+// daemon/teardown write under an agent name does NOT mask a hang. Best-effort.
+// IMPORTANT (fail-open by design — env-inheritance makes a positive live-marker
+// unreliable, see the CH3 entry-point map): any NEW execFile of `cortextos bus
+// <write-op>` from daemon/hook/teardown MUST set CTX_SUPPRESS_LAST_SEEN=1.
+busCommand.hook('preAction', (_thisCommand, actionCommand) => {
+  try {
+    if (!shouldRefreshLastSeen(actionCommand.name(), Boolean(process.env.CTX_SUPPRESS_LAST_SEEN))) return;
+    const env = resolveEnv();
+    if (!env.agentName) return;
+    touchLastSeen(resolvePaths(env.agentName, env.instanceId, env.org), env.agentName);
+  } catch { /* a liveness-refresh failure must never break the bus command */ }
+});
 
 busCommand
   .command('send-message')

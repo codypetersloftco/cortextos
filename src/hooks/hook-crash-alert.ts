@@ -134,13 +134,18 @@ export function notifyAgents(opts: {
   // dist/cli.js path (same pattern as fast-checker.ts heartbeat watchdog).
   const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
   const cliPath = frameworkRoot ? join(frameworkRoot, 'dist', 'cli.js') : null;
+  // CH3: this is a TEARDOWN-context bus write (the dying agent's SessionEnd hook).
+  // CTX_SUPPRESS_LAST_SEEN=1 stops the cli/bus.ts preAction from refreshing the
+  // crashing agent's last_seen — a crash must still go stale + trip the conjunction
+  // rule, never look alive the instant it died.
+  const suppressEnv = { ...process.env, CTX_SUPPRESS_LAST_SEEN: '1' };
   for (const target of opts.recipients) {
     try {
       if (cliPath) {
         execFile(
           process.execPath,
           [cliPath, 'bus', 'send-message', target, 'high', body],
-          { timeout: 10_000, windowsHide: true },
+          { timeout: 10_000, windowsHide: true, env: suppressEnv },
           () => { /* fire-and-forget */ },
         );
       } else {
@@ -148,7 +153,7 @@ export function notifyAgents(opts: {
         execFile(
           'cortextos',
           ['bus', 'send-message', target, 'high', body],
-          { timeout: 10_000, windowsHide: true },
+          { timeout: 10_000, windowsHide: true, env: suppressEnv },
           () => { /* fire-and-forget */ },
         );
       }

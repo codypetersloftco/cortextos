@@ -100,6 +100,51 @@ export function updateHeartbeat(
 }
 
 /**
+ * CH3: refresh ONLY the last_heartbeat timestamp from bus ACTIVITY, preserving
+ * every other heartbeat field (status, current_task, mode, …). Liveness then =
+ * "last bus activity", not just "last heartbeat-cron fire", so an agent actively
+ * working via the bus between cron fires is not falsely flagged stale (the inverse
+ * of the crash-alert false-positive). Called ONLY for SESSION-ORIGIN bus writes
+ * (see the cli/bus.ts preAction gate); a hung session emits no bus writes, so this
+ * never masks a real hang. Unlike updateHeartbeat it does NOT clearEndMarkers — a
+ * routine bus write is not a post-restart liveness event. Best-effort: never throws.
+ */
+export function touchLastSeen(paths: BusPaths, agentName: string): void {
+  try {
+    ensureDir(paths.stateDir);
+    const hbPath = join(paths.stateDir, 'heartbeat.json');
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    let hb: Partial<Heartbeat> = {};
+    if (existsSync(hbPath)) {
+      try { hb = JSON.parse(readFileSync(hbPath, 'utf-8')) as Partial<Heartbeat>; } catch { /* corrupt → minimal */ }
+    }
+    hb.agent = hb.agent ?? agentName;
+    hb.last_heartbeat = ts;
+    atomicWriteSync(hbPath, JSON.stringify(hb));
+  } catch { /* liveness refresh must never break a bus command */ }
+}
+
+/**
+ * CH3: the bus sub-commands whose execution proves the agent's live main loop is
+ * doing work — a WRITE refreshes last_seen. Reads (check-inbox, list-*, ack-*,
+ * recall, kb-query, …) are excluded: they don't prove ongoing work.
+ */
+export const LAST_SEEN_WRITE_OPS = new Set<string>([
+  'send-message', 'log-event', 'create-task', 'update-task', 'claim-task', 'complete-task',
+]);
+
+/**
+ * CH3 gate (testable): refresh last_seen iff this is a write-op AND not suppressed.
+ * `suppressed` = the CTX_SUPPRESS_LAST_SEEN opt-out that non-live / on-behalf CLI
+ * shell-outs (crash-alert teardown, hook-telemetry) set, so a daemon/teardown write
+ * under an agent name never masks a hang. Daemon-DIRECT writes never reach the CLI
+ * at all, so they are excluded structurally (not via this gate).
+ */
+export function shouldRefreshLastSeen(commandName: string, suppressed: boolean): boolean {
+  return !suppressed && LAST_SEEN_WRITE_OPS.has(commandName);
+}
+
+/**
  * Detect day/night mode based on timezone.
  * Day: 8:00 - 22:00, Night: 22:00 - 8:00
  */
