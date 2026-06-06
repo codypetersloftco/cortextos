@@ -18,6 +18,9 @@ const allowedDevOrigins = (process.env.DASHBOARD_ALLOWED_DEV_ORIGINS ?? '')
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['better-sqlite3'],
+  turbopack: {
+    root: process.cwd(),
+  },
   ...(allowedDevOrigins.length > 0 && { allowedDevOrigins }),
   async headers() {
     return [
