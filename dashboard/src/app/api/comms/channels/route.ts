@@ -200,5 +200,40 @@ export async function GET(request: NextRequest) {
   // Sort by last activity descending
   channels.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
 
+  // Part 2 (marks-on-serve drain): the user pseudo-agent ("admin") has no
+  // PTY/fast-checker to drain its inbox, so served replies pile up and keep the
+  // silent-failure canary (non-recursive *.json count in inbox/<user>/) above 0
+  // forever. Now that they've been SURFACED above, drain the USER inbox ONLY —
+  // never a real agent's inbox, whose live fast-checker owns it (draining that
+  // would steal undelivered messages). For each pending reply: (a) persist it to
+  // message-history.jsonl (durable; every comms route reads it as primary) then
+  // (b) MOVE the file into inbox/<user>/processed/ — the non-recursive canary
+  // ignores the subdir so the count drops to 0 without deleting, and the message
+  // stays readable (this route + channel/[pair] both scan processed). Couples
+  // surface+drain per serve, so it beats the canary's 4h age-gate naturally.
+  // Self-limiting: once the root is empty, subsequent polls no-op.
+  try {
+    const userInbox = path.join(inboxBase, identity.canonicalUser);
+    if (fs.existsSync(userInbox)) {
+      const pending = fs.readdirSync(userInbox).filter(f => f.endsWith('.json') && !f.startsWith('.'));
+      if (pending.length > 0) {
+        const histLog = path.join(ctxRoot, 'logs', 'message-history.jsonl');
+        fs.mkdirSync(path.dirname(histLog), { recursive: true });
+        const processedDir = path.join(userInbox, 'processed');
+        fs.mkdirSync(processedDir, { recursive: true });
+        for (const file of pending) {
+          try {
+            const src = path.join(userInbox, file);
+            const msg = JSON.parse(fs.readFileSync(src, 'utf-8'));
+            if (msg.id && msg.from && msg.to && msg.timestamp) {
+              fs.appendFileSync(histLog, JSON.stringify(msg) + '\n');
+            }
+            fs.renameSync(src, path.join(processedDir, file));
+          } catch { /* locked/corrupt/raced — left in root, retried next serve */ }
+        }
+      }
+    }
+  } catch { /* drain is best-effort; it must never break the response */ }
+
   return Response.json(channels);
 }

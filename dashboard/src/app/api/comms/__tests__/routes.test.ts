@@ -178,6 +178,56 @@ describe('GET /api/comms/channels', () => {
     expect(ch.last_message.text).toBe('agent reply only in inbox');
     expect(ch.last_message.from).toBe('boris');
   });
+
+  // Part 2 (drain, marks-on-serve): the user pseudo-agent has no PTY/fast-checker
+  // to drain its inbox, so served replies must be drained by the dashboard on
+  // serve, else the silent-failure canary (non-recursive *.json count in
+  // inbox/<user>/) stays > 0 forever. Surface FIRST (above), then: (a) persist
+  // the served reply to message-history.jsonl so every route keeps showing it,
+  // (b) MOVE the file to inbox/<user>/processed/ so the non-recursive canary
+  // drops to 0 without deleting (the message stays readable — both this list
+  // route and channel/[pair] scan the processed subdir).
+  it('drains a served user-inbox reply to processed/ and persists it to history', async () => {
+    const ts = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    const inboxDir = path.join(rootTmp, 'inbox', 'james'); // james = ADMIN_USERNAME
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const fname = '2-1780000002000-from-boris-yyyyy.json';
+    fs.writeFileSync(
+      path.join(inboxDir, fname),
+      JSON.stringify({ id: '1780000002000-boris-yyyyy', from: 'boris', to: 'james', priority: 'normal', timestamp: ts, text: 'served reply', reply_to: null }),
+    );
+
+    await channels.GET(makeRequest('/api/comms/channels'));
+
+    // (b) drained out of the inbox root -> canary (non-recursive glob) hits 0
+    expect(fs.existsSync(path.join(inboxDir, fname))).toBe(false);
+    // moved to the processed subdir (still readable, not deleted)
+    expect(fs.existsSync(path.join(inboxDir, 'processed', fname))).toBe(true);
+    // (a) persisted durably so every comms route keeps surfacing it
+    const histPath = path.join(rootTmp, 'logs', 'message-history.jsonl');
+    expect(fs.existsSync(histPath)).toBe(true);
+    expect(fs.readFileSync(histPath, 'utf-8')).toContain('1780000002000-boris-yyyyy');
+  });
+
+  // SAFETY: the drain must touch ONLY the user pseudo-agent inbox. Real agents
+  // have a live PTY/fast-checker that consumes their inbox; draining it here
+  // would STEAL undelivered messages before the agent ever sees them.
+  it('does NOT drain a real agent inbox (only the user pseudo-agent)', async () => {
+    const ts = new Date().toISOString();
+    const inboxDir = path.join(rootTmp, 'inbox', 'boris'); // boris is a real agent
+    fs.mkdirSync(inboxDir, { recursive: true });
+    const fname = '2-1780000003000-from-nick-wwwww.json';
+    fs.writeFileSync(
+      path.join(inboxDir, fname),
+      JSON.stringify({ id: '1780000003000-nick-wwwww', from: 'nick', to: 'boris', priority: 'normal', timestamp: ts, text: 'agent to agent', reply_to: null }),
+    );
+
+    await channels.GET(makeRequest('/api/comms/channels'));
+
+    // boris's fast-checker owns this — it must be left exactly where it is
+    expect(fs.existsSync(path.join(inboxDir, fname))).toBe(true);
+    expect(fs.existsSync(path.join(inboxDir, 'processed', fname))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
