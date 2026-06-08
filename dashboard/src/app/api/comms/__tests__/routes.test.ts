@@ -153,6 +153,31 @@ describe('GET /api/comms/channels', () => {
     expect(data).toHaveLength(1);
     expect(data[0].archived).toBe(true);
   });
+
+  // Regression for the admin/dashboard-comms surfacing bug: an agent replies
+  // to the dashboard user via `bus send-message <user>`, which writes the file
+  // to inbox/<user>/ ONLY — never to message-history.jsonl (no prod writer) and
+  // never to the Telegram logs. The user pseudo-agent has no PTY/fast-checker,
+  // so nothing drains it. The channels LIST must still surface the reply (its
+  // two sibling routes channel/[pair] + feed already scan the inbox; this list
+  // route did not, so the conversation never showed the new reply).
+  it('surfaces an agent->user reply that exists only in the inbox (no history log)', async () => {
+    const ts = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const inboxDir = path.join(rootTmp, 'inbox', 'james'); // 'james' = ADMIN_USERNAME (canonical user)
+    fs.mkdirSync(inboxDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(inboxDir, '2-1780000001000-from-boris-zzzzz.json'),
+      JSON.stringify({ id: '1780000001000-boris-zzzzz', from: 'boris', to: 'james', priority: 'normal', timestamp: ts, text: 'agent reply only in inbox', reply_to: null }),
+    );
+
+    const res = await channels.GET(makeRequest('/api/comms/channels'));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    const ch = data.find((c: { pair: string }) => c.pair === 'boris--james');
+    expect(ch).toBeDefined();
+    expect(ch.last_message.text).toBe('agent reply only in inbox');
+    expect(ch.last_message.from).toBe('boris');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -65,6 +65,39 @@ export async function GET(request: NextRequest) {
     } catch { /* empty */ }
   }
 
+  // Surface bus messages still sitting in inbox dirs that are not in the
+  // history log. The user pseudo-agent ("admin") has no PTY/fast-checker, so
+  // agent replies sent to it via `bus send-message admin` pile up in
+  // inbox/admin/ and are never written to message-history.jsonl — without this
+  // scan the channels LIST never reflects them and the conversation never shows
+  // the new reply (the surfacing bug). Mirrors the inbox fallback already in the
+  // sibling channel/[pair] + feed routes. Scans only inbox/<agent>/ subdirs
+  // (root, inflight, processed) — NOT the top-level processed/ archive — so the
+  // list surfaces pending + drained-on-serve replies without dumping the full
+  // agent<->agent history into the conversation list.
+  let inboxAgentDirs: string[];
+  try {
+    inboxAgentDirs = fs.readdirSync(inboxBase, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+  } catch { inboxAgentDirs = []; }
+  for (const agent of inboxAgentDirs) {
+    for (const sub of ['', 'inflight', 'processed']) {
+      const dir = sub ? path.join(inboxBase, agent, sub) : path.join(inboxBase, agent);
+      if (!fs.existsSync(dir)) continue;
+      let files: string[];
+      try {
+        files = fs.readdirSync(dir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
+      } catch { continue; }
+      for (const file of files) {
+        try {
+          const msg: BusMessage = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8'));
+          if (msg.id && msg.from && msg.to && msg.timestamp) allMessages.push(msg);
+        } catch { /* skip corrupt */ }
+      }
+    }
+  }
+
   // Include Telegram messages
   const logsBase = path.join(ctxRoot, 'logs');
   if (fs.existsSync(logsBase)) {
