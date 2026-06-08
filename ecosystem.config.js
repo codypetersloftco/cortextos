@@ -18,7 +18,17 @@ module.exports = {
         CTX_PROJECT_ROOT: "C:\\Users\\cody\\cortextos",
         CTX_ORG: process.env.CTX_ORG || "loftco-autopilot",
       },
+      // BUG-016: max_restarts stays 50 (NOT 10); min_uptime resets the count
+      // after a stable run so a multi-week daemon's transient restarts don't
+      // exhaust it.
       max_restarts: 50,
+      // OOM-hardening (Wave 1): graceful RSS recycle (~12x headroom over the
+      // daemon's ~75MB steady-state) before host commit-memory exhaustion;
+      // min_uptime + exp_backoff bound crash-loop churn. NO hard heap cap by
+      // design (a hard cap FatalOOMs on hit = the failure we are preventing).
+      max_memory_restart: '900M',
+      min_uptime: '30s',
+      exp_backoff_restart_delay: 10000,
       restart_delay: 5000,
       autorestart: true,
     },
@@ -34,6 +44,11 @@ module.exports = {
       // by /onboarding Phase 7. PM2 just supervises the dashboard process.
       windowsHide: true,
       max_restarts: 50,
+      // OOM-hardening (Wave 1): graceful RSS recycle (1400M = huge headroom
+      // over ~18MB steady-state). NO hard heap cap by design.
+      max_memory_restart: '1400M',
+      min_uptime: '30s',
+      exp_backoff_restart_delay: 10000,
       restart_delay: 5000,
       autorestart: true,
     },

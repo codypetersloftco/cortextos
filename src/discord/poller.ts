@@ -33,6 +33,7 @@ export class DiscordPoller {
   private offsetFileName: string;
   private messageHandlers: DiscordMessageHandler[] = [];
   private pollInterval: number;
+  private consecutivePollErrors: number = 0;
   private log: (msg: string) => void;
   /**
    * True once the cursor is anchored — either loaded from a persisted
@@ -77,11 +78,26 @@ export class DiscordPoller {
     while (this.running) {
       try {
         await this.pollOnce();
+        this.consecutivePollErrors = 0;
       } catch (err) {
         // Transient (rate-limit, network, 5xx) — log and keep polling. The
         // offset only advanced for messages whose handlers succeeded, so
         // nothing is lost on a mid-batch error.
+        //
+        // OOM-hardening (Wave 1): on a sustained outage (Discord 503/timeout
+        // storm) the bare pollInterval hammered the API every cycle and
+        // flooded the daemon log (the 2026-06-05 incident log was mostly
+        // poller-timeout spam). Back off exponentially on consecutive errors
+        // (capped at 60s) and reset to the normal cadence on the first
+        // success, so a healthy channel is unaffected.
+        this.consecutivePollErrors++;
         console.error('[discord-poller] Poll error:', err instanceof Error ? err.message : err);
+        const backoff = Math.min(
+          60000,
+          this.pollInterval * Math.pow(2, Math.min(this.consecutivePollErrors, 5)),
+        );
+        await sleep(backoff);
+        continue;
       }
       await sleep(this.pollInterval);
     }

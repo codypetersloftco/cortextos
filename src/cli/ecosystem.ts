@@ -115,6 +115,16 @@ export const ecosystemCommand = new Command('ecosystem')
       // by /onboarding Phase 7. PM2 just supervises the dashboard process.
       windowsHide: true,
       max_restarts: 50,
+      // OOM-hardening (Wave 1): graceful RSS-based recycle before host memory
+      // pressure builds. 1400M is huge headroom over the dashboard's ~18MB
+      // steady-state (next start), so it never false-trips; it only fires if
+      // a leak climbs. min_uptime + exp_backoff bound rapid restart churn.
+      // NOTE: deliberately NO hard --max-old-space-size cap — a hard heap cap
+      // FatalOOM-crashes the process when hit, which is the failure mode we are
+      // preventing; max_memory_restart recycles gracefully instead.
+      max_memory_restart: '1400M',
+      min_uptime: '30s',
+      exp_backoff_restart_delay: 10000,
       restart_delay: 5000,
       autorestart: true,
     }`
@@ -140,7 +150,22 @@ module.exports = {
         CTX_PROJECT_ROOT: ${JSON.stringify(projectRoot)},
         CTX_ORG: process.env.CTX_ORG || ${JSON.stringify(detectedOrg)},
       },
+      // BUG-016: max_restarts stays 50 (NOT reverted to 10). PM2 counts these
+      // toward unstable restarts; min_uptime below resets the count after a
+      // stable run, so this gives crash-loop headroom without exhausting on a
+      // multi-week-uptime daemon's occasional transient restart.
       max_restarts: 50,
+      // OOM-hardening (Wave 1): graceful RSS recycle. Daemon steady-state is
+      // ~75MB, so 900M is ~12x headroom (no false-trip) yet recycles the
+      // process — releasing accumulated handles/leaks (e.g. node-pty ConPTY
+      // churn) — well before host commit-memory exhaustion. min_uptime marks a
+      // sub-30s exit as unstable; exp_backoff grows the delay between rapid
+      // restarts so a crash-loop can't hammer the host. NO hard
+      // --max-old-space-size cap on purpose (a hard cap FatalOOMs on hit = the
+      // very failure we are preventing; let the graceful RSS recycle win).
+      max_memory_restart: '900M',
+      min_uptime: '30s',
+      exp_backoff_restart_delay: 10000,
       restart_delay: 5000,
       autorestart: true,
     }${dashboardAppBlock},
