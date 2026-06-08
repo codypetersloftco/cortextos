@@ -11,8 +11,13 @@ import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
+import type { SpawnDecision } from './spawn-governor.js';
 
 type LogFn = (msg: string) => void;
+// OOM Wave 2 (Patch 6 / F2): a manager-owned spawn-gate callback. AgentProcess
+// holds only this thunk (not an AgentManager reference) to avoid a circular
+// dependency while still letting the manager own fleet-wide memory policy.
+type SpawnGate = () => SpawnDecision;
 
 /**
  * Manages a single agent's lifecycle.
@@ -30,8 +35,14 @@ export class AgentProcess {
   // Timestamps of recent crashes within the configured window. If the
   // window fills, the agent auto-pauses instead of retrying with backoff.
   private crashTimestamps: number[] = [];
-  private crashWindowMs: number = 0;
-  private crashWindowMax: number = 0;
+  // OOM Wave 2 (Patch 2): code-level crash-window DEFAULTS (600s / 3 crashes).
+  // Previously 0/0, which left the CrashLoopPauser dead unless an agent's
+  // config.json opted in — the exact gap that let the 2026-06-05 OOM crash
+  // loop run unbounded fleet-wide. A non-zero default means a no-config agent
+  // can no longer silently lose crash-loop protection. Wave 1 set this via
+  // config on the current 5 agents; this default covers future agents too.
+  private crashWindowMs: number = 10 * 60 * 1000;
+  private crashWindowMax: number = 3;
   private sessionStart: Date | null = null;
   private status: AgentStatus['status'] = 'stopped';
   private stopping: boolean = false;
@@ -70,19 +81,29 @@ export class AgentProcess {
   // (skipped on handoff restart — the agent sends its own contextual reply).
   private lastSpawnWasHandoff = false;
 
-  constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn) {
+  // OOM Wave 2 (Patch 6 / F2): optional spawn gate consulted at the top of
+  // start(). Undefined = no gating (e.g. tests / standalone use) → spawn always
+  // permitted. The manager passes `() => this.spawnGovernor.canSpawn()`.
+  private spawnGate?: SpawnGate;
+
+  constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn, spawnGate?: SpawnGate) {
     this.name = name;
     this.env = env;
     this.config = config;
     if (config.max_crashes_per_day !== undefined) {
       this.maxCrashesPerDay = config.max_crashes_per_day;
     }
-    if (config.crash_window?.seconds) {
-      this.crashWindowMs = config.crash_window.seconds * 1000;
+    // OOM Wave 2 (Patch 2): an explicit crash_window in config overrides the
+    // code defaults above. `seconds` is optional — absent falls back to 600s
+    // (rather than NaN), and `{ max_crashes: 3 }` alone is a valid window.
+    if (config.crash_window) {
+      const seconds = config.crash_window.seconds ?? 600;
+      this.crashWindowMs = seconds * 1000;
       this.crashWindowMax = config.crash_window.max_crashes ?? 3;
     }
     this.dedup = new MessageDedup();
     this.log = log || ((msg) => console.log(`[${name}] ${msg}`));
+    this.spawnGate = spawnGate;
   }
 
   /**
@@ -91,6 +112,30 @@ export class AgentProcess {
   async start(): Promise<void> {
     if (this.status === 'running') {
       this.log('Already running');
+      return;
+    }
+
+    // OOM Wave 2 (Patch 6 / F2): host-memory spawn gate. Checked at the VERY
+    // TOP of start() so it covers EVERY spawn path — initial start, manager
+    // honored restart, session refresh, AND the crash-backoff restart in
+    // handleExit() (the path that actually OOM'd the box on 2026-06-05). A
+    // deferral is a clean no-op: NO lifecycle-generation bump, NO PTY
+    // allocation, NO onExit wiring, and — critically — it does NOT call
+    // handleExit() or increment crashCount (host pressure is not an agent
+    // crash). It parks in 'crashed' state (the only recoverable retry state in
+    // the current AgentStatus union) and re-attempts after retryMs. Each retry
+    // timer re-checks status==='crashed' before firing, so overlapping timers
+    // cannot double-spawn.
+    const spawnDecision: SpawnDecision = this.spawnGate?.() ?? { ok: true };
+    if (!spawnDecision.ok) {
+      this.log(`SPAWN_DEFERRED: ${spawnDecision.reason}; retry in ${spawnDecision.retryMs / 1000}s`);
+      this.status = 'crashed';
+      this.notifyStatusChange();
+      setTimeout(() => {
+        if (this.status === 'crashed') {
+          this.start().catch(err => this.log(`Deferred spawn retry failed: ${err}`));
+        }
+      }, spawnDecision.retryMs);
       return;
     }
 
@@ -194,9 +239,22 @@ export class AgentProcess {
 
       this.notifyStatusChange();
     } catch (err) {
+      // OOM Wave 2 (Patch 3): a spawn failure (pty.spawn() throw — Patch 7
+      // surfaces ConPTY/node-pty failures as named errors here) must flow
+      // through crash accounting, NOT silently park in 'crashed'. Before this,
+      // a spawn-fail set status='crashed' with no crash-count increment, no
+      // crash-window timestamp, and no restarts.log entry — so a hard-down
+      // binary could wedge invisibly. handleExit(1) runs the full path:
+      // crash-window check, daily counter, backoff restart, and audit log.
+      // This is distinct from the memory-governor deferral above, which is a
+      // no-op that must NOT count as a crash. Note: this is NOT gated by the
+      // BUG-040 lifecycle-generation guard (that guards the async onExit
+      // closure against late exits from superseded PTYs); a synchronous
+      // spawn-fail in the current lifecycle is unconditionally a real failure.
       this.log(`Failed to start: ${err}`);
-      this.status = 'crashed';
-      this.notifyStatusChange();
+      this.pty = null;
+      this.clearSessionTimer();
+      this.handleExit(1);
     }
   }
 

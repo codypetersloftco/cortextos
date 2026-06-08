@@ -62,10 +62,18 @@ export class AgentPTY {
       throw new Error('PTY already spawned. Kill first.');
     }
 
-    // Lazy-load node-pty (native addon)
+    // Lazy-load node-pty (native addon). OOM Wave 2 (Patch 7): wrap the require
+    // so a native-addon load failure surfaces a named, actionable error instead
+    // of a bare module-resolution throw. NOTE: this is defensive hygiene only —
+    // it does NOT fix the conpty AttachConsole leak; it just improves the error
+    // message when node-pty cannot be loaded.
     if (!this.spawnFn) {
-      const nodePty = require('node-pty');
-      this.spawnFn = nodePty.spawn;
+      try {
+        const nodePty = require('node-pty');
+        this.spawnFn = nodePty.spawn;
+      } catch (err) {
+        throw new Error(`node-pty load failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     const cwd = this.config.working_directory || this.env.agentDir || process.cwd();
@@ -163,14 +171,22 @@ export class AgentPTY {
     const claudeArgs = this.buildClaudeArgs(mode, prompt);
     const claudeCmd = this.getBinaryName();
 
-    this.pty = this.spawnFn!(claudeCmd, claudeArgs, {
-      name: 'xterm-256color',
-      cols: 200,
-      rows: 50,
-      cwd,
-      env: ptyEnv,
-      ...(process.platform === 'win32' ? { useConpty: true } : {}),
-    });
+    // OOM Wave 2 (Patch 7): wrap the spawn so a ConPTY/CreateProcess failure
+    // (e.g. the "File not found" / AttachConsole class of errors) throws a
+    // named error naming the command. AgentProcess.start()'s catch routes this
+    // through crash accounting (Patch 3) rather than leaving the agent wedged.
+    try {
+      this.pty = this.spawnFn!(claudeCmd, claudeArgs, {
+        name: 'xterm-256color',
+        cols: 200,
+        rows: 50,
+        cwd,
+        env: ptyEnv,
+        ...(process.platform === 'win32' ? { useConpty: true } : {}),
+      });
+    } catch (err) {
+      throw new Error(`node-pty spawn failed for ${claudeCmd}: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     this._alive = true;
 

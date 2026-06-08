@@ -159,10 +159,13 @@ export interface AgentConfig {
   max_crashes_per_day?: number;
   /**
    * Sliding-window crash-loop detector. When N crashes occur within the window,
-   * the agent auto-pauses (status: 'halted') instead of retrying. Absent = legacy
-   * daily counter only.
+   * the agent auto-pauses (status: 'halted') instead of retrying. As of OOM
+   * Wave 2 (Patch 2) the daemon also applies a code-level default window
+   * (600s / 3 crashes) when this is absent, so a no-config agent can no longer
+   * silently lose crash-loop protection. `seconds` is optional — omitting it
+   * falls back to the 600s default rather than producing a NaN window.
    */
-  crash_window?: { seconds: number; max_crashes?: number };
+  crash_window?: { seconds?: number; max_crashes?: number };
   model?: string;
   /**
    * Whether to launch Claude Code with `--dangerously-skip-permissions`.

@@ -446,3 +446,90 @@ describe('AgentManager.reloadCrons - silent-success bug fix (iter 7)', () => {
     expect((am as any).cronSchedulers.has('ghost')).toBe(false);
   });
 });
+
+describe('AgentManager — OOM Wave 2 (Patch 5: bounded restarts + dead-runtime teardown)', () => {
+  // These paths read no filesystem state (detectDaemonCrashMarkers no-ops on a
+  // missing state dir), so plain sandbox paths are sufficient.
+  const mk = () => new AgentManager('test-instance', '/tmp/ctx-oom-w2', '/tmp/fw-oom-w2', 'acme');
+
+  it('isTerminalRegisteredStatus: halted/crashed/stopped with no pid are terminal; a live pid is not', () => {
+    const am = mk();
+    const f = (s: unknown) => (am as any).isTerminalRegisteredStatus(s);
+    expect(f({ status: 'halted' })).toBe(true);
+    expect(f({ status: 'crashed' })).toBe(true);
+    expect(f({ status: 'stopped' })).toBe(true);
+    // A live pid means the runtime is NOT dead — must not be torn down.
+    expect(f({ status: 'crashed', pid: 999 })).toBe(false);
+    expect(f({ status: 'running', pid: 1 })).toBe(false);
+    expect(f({ status: 'running' })).toBe(false);
+    expect(f(undefined)).toBe(false);
+  });
+
+  it('removeDeadRuntime awaits process.stop() and tears down pollers/checker/scheduler before deleting (F1)', async () => {
+    const am = mk();
+    const order: string[] = [];
+    const stopProcess = vi.fn().mockImplementation(async () => { order.push('process.stop'); });
+    const poller = { stop: vi.fn().mockImplementation(() => order.push('poller.stop')) };
+    const activityPoller = { stop: vi.fn() };
+    const discordPoller = { stop: vi.fn() };
+    const checker = { stop: vi.fn().mockImplementation(() => order.push('checker.stop')) };
+    const schedulerStop = vi.fn();
+
+    (am as any).agents.set('alice', {
+      process: { stop: stopProcess, getStatus: () => ({ status: 'crashed' }) },
+      checker, poller, activityPoller, discordPoller,
+    });
+    (am as any).cronSchedulers.set('alice', { stop: schedulerStop });
+
+    await (am as any).removeDeadRuntime('alice', 'terminal status=crashed');
+
+    // The load-bearing F1 guarantee: stop() was awaited (disarms the orphan
+    // crash-backoff timer) before the entry was removed.
+    expect(stopProcess).toHaveBeenCalledTimes(1);
+    expect(poller.stop).toHaveBeenCalledTimes(1);
+    expect(activityPoller.stop).toHaveBeenCalledTimes(1);
+    expect(discordPoller.stop).toHaveBeenCalledTimes(1);
+    expect(checker.stop).toHaveBeenCalledTimes(1);
+    expect(schedulerStop).toHaveBeenCalledTimes(1);
+    expect((am as any).agents.has('alice')).toBe(false);
+    expect((am as any).cronSchedulers.has('alice')).toBe(false);
+    expect(order).toContain('process.stop');
+  });
+
+  it('duplicate startAgent on a LIVE agent (not stopping) is ignored and does NOT enqueue a restart', async () => {
+    // Regression vs the old code, which unconditionally added to pendingRestarts
+    // for any in-registry name — resurrecting agents the operator never asked to
+    // restart. New behavior: a live, non-terminal, not-stopping duplicate is a
+    // no-op early return.
+    const am = mk();
+    const proc = { getStatus: () => ({ name: 'alice', status: 'running', pid: 4242 }) };
+    const entry = { process: proc, checker: {} };
+    (am as any).agents.set('alice', entry);
+
+    await am.startAgent('alice', '/tmp/fw-oom-w2/orgs/acme/agents/alice');
+
+    // Ignored: registry entry untouched, nothing queued.
+    expect((am as any).agents.get('alice')).toBe(entry);
+    expect((am as any).pendingRestarts.has('alice')).toBe(false);
+    expect((am as any).pendingRestartFirstSeen.has('alice')).toBe(false);
+  });
+
+  it('a terminal (halted) registered entry is torn down via removeDeadRuntime on startAgent', async () => {
+    // `cortextos start <halted-agent>` path: the dead entry must be removed so a
+    // fresh start can proceed. We spy removeDeadRuntime to confirm the branch is
+    // taken without running the full (fs/PTY-heavy) start body.
+    const am = mk();
+    const removeSpy = vi.spyOn(am as any, 'removeDeadRuntime').mockResolvedValue(undefined);
+    // Force the post-removeDeadRuntime fall-through to bail before the heavy
+    // body by stubbing the org resolver to a path that does not exist, so
+    // startAgent returns at the "Agent directory not found" guard.
+    (am as any).agents.set('alice', {
+      process: { getStatus: () => ({ status: 'halted' }) },
+      checker: {},
+    });
+
+    await am.startAgent('alice', '/no/such/dir/that/exists');
+
+    expect(removeSpy).toHaveBeenCalledWith('alice', expect.stringContaining('terminal status=halted'));
+  });
+});

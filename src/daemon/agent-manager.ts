@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlink
 import { join, relative } from 'path';
 import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage } from '../types/index.js';
 import { AgentProcess } from './agent-process.js';
+import { SpawnGovernor } from './spawn-governor.js';
 import { WorkerProcess } from './worker-process.js';
 import { FastChecker } from './fast-checker.js';
 import { CronScheduler } from './cron-scheduler.js';
@@ -34,6 +35,19 @@ export class AgentManager {
   // Tracks agents that received a start request while still stopping.
   // stopAgent() honors these after cleanup completes so restart-all is race-free.
   private pendingRestarts: Set<string> = new Set();
+  // OOM Wave 2 (Patch 5): agents whose stop() is currently in flight. A
+  // concurrent startAgent() consults this to tell "stopping → queue one
+  // bounded restart" apart from "live duplicate → ignore". Set at the very
+  // start of stopAgent()'s teardown, cleared in its finally.
+  private stoppingAgents: Set<string> = new Set();
+  // OOM Wave 2 (Patch 5): first time each name was seen queued for restart, so
+  // a wedged stop can't leave a permanent pendingRestarts entry (5m staleness
+  // bound). Cleared whenever the queued restart is honored or dropped.
+  private pendingRestartFirstSeen: Map<string, number> = new Map();
+  // OOM Wave 2 (Patch 6 / F2): one fleet-wide host-memory spawn governor.
+  // Passed as a callback into every AgentProcess so crash-backoff restarts
+  // (which spawn from inside AgentProcess, not the manager) are gated too.
+  private spawnGovernor = new SpawnGovernor();
   private instanceId: string;
   private ctxRoot: string;
   private frameworkRoot: string;
@@ -247,35 +261,98 @@ export class AgentManager {
     return { ok: true };
   }
 
+  /**
+   * OOM Wave 2 (Patch 5): a registered entry is "terminal" when its process is
+   * in a final, no-live-PTY state (halted / crashed / stopped with no pid).
+   * Such an entry is safe to tear down and replace with a fresh start — this is
+   * what makes `cortextos start <halted-agent>` work instead of dead-ending on
+   * "already in registry".
+   */
+  private isTerminalRegisteredStatus(status?: AgentStatus): boolean {
+    return !!status
+      && (status.status === 'halted' || status.status === 'crashed' || status.status === 'stopped')
+      && !status.pid;
+  }
+
+  /**
+   * OOM Wave 2 (Patch 5 / F1): tear down a dead registry entry before a fresh
+   * start. The load-bearing line is `await entry.process.stop()`:
+   *
+   *   - A crashed agent in backoff has status==='crashed' AND a live
+   *     setTimeout() armed in handleExit() that will later check
+   *     `if (this.status === 'crashed') this.start()`.
+   *   - If we merely `agents.delete()` and start fresh, that old AgentProcess
+   *     object can still fire its timer and spawn an UNTRACKED PTY — the exact
+   *     orphan-PTY churn that fed the OOM.
+   *   - stop() is safe on a null-PTY crashed process and flips status→stopped,
+   *     disarming that guarded timer.
+   *
+   * Mirrors stopAgent()'s teardown but deliberately omits the pendingRestarts
+   * honor logic (calling stopAgent here would recurse into startAgent).
+   */
+  private async removeDeadRuntime(name: string, reason: string): Promise<void> {
+    const entry = this.agents.get(name);
+    if (!entry) return;
+    console.warn(`[agent-manager] Removing dead runtime for ${name} before fresh start: ${reason}`);
+    if (entry.poller) entry.poller.stop();
+    if (entry.activityPoller) entry.activityPoller.stop();
+    if (entry.discordPoller) entry.discordPoller.stop();
+    entry.checker.stop();
+    await entry.process.stop();
+    const scheduler = this.cronSchedulers.get(name);
+    if (scheduler) {
+      scheduler.stop();
+      this.cronSchedulers.delete(name);
+    }
+    this.agents.delete(name);
+  }
+
   async startAgent(name: string, agentDir: string, config?: AgentConfig, org?: string): Promise<void> {
     if (this.agents.has(name)) {
-      // BUG-031: this branch was the workaround for the BUG-011 PTY race
-      // (restart-all could send stop+start simultaneously, and the new
-      // start would arrive while the old stop's PTY exit was still in
-      // flight). PR #11 closed BUG-011 by making `AgentProcess.stop()`
-      // await the actual PTY exit before resolving — which means this
-      // branch should NEVER fire under normal restart paths.
-      //
-      // We log a regression warning here instead of deleting the branch
-      // entirely, so we'll know IMMEDIATELY if BUG-011 ever regresses
-      // (a future change accidentally breaks the exit-await). Phase 4 of
-      // the core stability test plan + cycle 2 of PR #13 both confirmed
-      // this branch is dormant. Once we have weeks of zero-warning
-      // production data, we can delete the queue mechanism entirely.
-      if (this.daemonJustCrashed) {
-        // Post-crash startup. The previous daemon exited via
-        // uncaughtException without running stopAll(), so the in-memory
-        // registry from the prior process is gone — but the post-crash
-        // discoverAndStart pass can briefly re-enter startAgent for an
-        // agent whose pendingRestarts entry survived. This is benign and
-        // distinct from the BUG-011 in-flight race PR #11 closed. Log at
-        // info level so operators don't think PR #11 has regressed.
-        console.log(`[agent-manager] ${name} already in registry (post-crash discovery overlap, expected). Queueing restart.`);
+      const status = this.agents.get(name)?.process.getStatus();
+
+      // OOM Wave 2 (Patch 5): three-way disambiguation of "already in registry",
+      // replacing the old unconditional `pendingRestarts.add + return`.
+      if (this.isTerminalRegisteredStatus(status)) {
+        // Dead entry (halted/crashed/stopped, no live pid): tear it down and
+        // FALL THROUGH to a fresh start. Enables `cortextos start <halted>` and
+        // disarms any orphan crash-backoff timer (F1). No return here.
+        await this.removeDeadRuntime(name, `terminal status=${status?.status}`);
+      } else if (this.stoppingAgents.has(name)) {
+        // A stop() is genuinely in flight (the original BUG-031/BUG-011 race:
+        // restart-all sent stop+start and start arrived mid-teardown). Queue
+        // exactly one restart, BOUNDED so a wedged stop can't pin the entry
+        // forever.
+        const now = Date.now();
+        const firstSeen = this.pendingRestartFirstSeen.get(name) ?? now;
+        this.pendingRestartFirstSeen.set(name, firstSeen);
+        if (now - firstSeen > 5 * 60 * 1000) {
+          console.warn(`[agent-manager] Dropping stale pending restart for ${name}; stop window exceeded 5m`);
+          this.pendingRestarts.delete(name);
+          this.pendingRestartFirstSeen.delete(name);
+          return;
+        }
+        if (this.daemonJustCrashed) {
+          // Post-crash discovery overlap — benign, distinct from a real
+          // BUG-011 regression. Log at info level (PR #11 context preserved).
+          console.log(`[agent-manager] ${name} stopping during post-crash discovery — queueing one restart (expected).`);
+        } else {
+          console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: ${name} still stopping during startAgent — queueing restart as safety net. Should not happen with PR #11 in place.`);
+        }
+        this.pendingRestarts.add(name);
+        return;
       } else {
-        console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: ${name} still in registry during startAgent — pendingRestarts queueing engaged. This should not happen with PR #11 in place.`);
+        // Live, non-terminal, NOT stopping: a genuine duplicate start (e.g. an
+        // IPC enable racing discovery). Ignore it rather than queueing a
+        // spurious future restart — the old code's unconditional enqueue could
+        // resurrect an agent the operator never asked to restart.
+        if (this.daemonJustCrashed) {
+          console.log(`[agent-manager] Ignoring duplicate startAgent(${name}) during post-crash discovery; status=${status?.status ?? 'unknown'} pid=${status?.pid ?? 'none'} (expected).`);
+        } else {
+          console.warn(`[agent-manager] Ignoring duplicate startAgent(${name}); status=${status?.status ?? 'unknown'} pid=${status?.pid ?? 'none'}`);
+        }
+        return;
       }
-      this.pendingRestarts.add(name);
-      return;
     }
 
     // BUG-043 fix: resolve the agent's true org instead of using `this.org`.
@@ -373,7 +450,11 @@ export class AgentManager {
       }
     }
 
-    const agentProcess = new AgentProcess(name, env, config, log);
+    // OOM Wave 2 (Patch 6 / F2): pass the manager-owned spawn governor as a
+    // callback. AgentProcess consults it at the top of EVERY start() — including
+    // the crash-backoff restart that fires from inside AgentProcess.handleExit()
+    // (the path the manager cannot gate directly, and the one that OOM'd the box).
+    const agentProcess = new AgentProcess(name, env, config, log, () => this.spawnGovernor.canSpawn());
     // Issue #330: pass the Telegram handle into AgentProcess so CodexAppServerPTY
     // can emit sendChatAction directly from the JSONL stream. Has no effect for
     // claude-code / hermes runtimes — those still use fast-checker.
@@ -1015,12 +1096,21 @@ export class AgentManager {
       return;
     }
 
-    if (entry.poller) entry.poller.stop();
-    if (entry.activityPoller) entry.activityPoller.stop();
-    if (entry.discordPoller) entry.discordPoller.stop();
-    entry.checker.stop();
-    await entry.process.stop();
-    this.agents.delete(name);
+    // OOM Wave 2 (Patch 5): mark the stop in flight BEFORE any teardown so a
+    // concurrent startAgent() can distinguish "stopping → queue one restart"
+    // from "live duplicate → ignore". Cleared in finally so an exception
+    // mid-teardown can't leave the agent permanently flagged as stopping.
+    this.stoppingAgents.add(name);
+    try {
+      if (entry.poller) entry.poller.stop();
+      if (entry.activityPoller) entry.activityPoller.stop();
+      if (entry.discordPoller) entry.discordPoller.stop();
+      entry.checker.stop();
+      await entry.process.stop();
+      this.agents.delete(name);
+    } finally {
+      this.stoppingAgents.delete(name);
+    }
 
     // Stop and remove the agent's cron scheduler (if one was wired)
     const scheduler = this.cronSchedulers.get(name);
@@ -1030,10 +1120,10 @@ export class AgentManager {
     }
 
     // BUG-031: honor any restart that was queued while we were stopping.
-    // After PR #11 (BUG-011 fix) this branch should never fire — see the
-    // matching warning comment in startAgent(). The honor logic is preserved
-    // as a safety net in case BUG-011 regresses; the warn line tells us
-    // immediately if it ever does.
+    // After PR #11 (BUG-011 fix) this branch should rarely fire — see the
+    // matching comment in startAgent(). The honor logic is preserved as a
+    // safety net in case BUG-011 regresses; the warn line tells us immediately
+    // if it ever does.
     if (this.pendingRestarts.has(name)) {
       if (this.daemonJustCrashed) {
         console.log(`[agent-manager] pendingRestarts fired for ${name} (post-crash safety net, expected). Honoring queued restart.`);
@@ -1041,10 +1131,15 @@ export class AgentManager {
         console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: pendingRestarts fired for ${name} — race condition leaked through. Honoring queued restart as safety net.`);
       }
       this.pendingRestarts.delete(name);
+      // OOM Wave 2 (Patch 5): clear the staleness clock alongside the queue
+      // entry, and defer the honored restart by 5s. The delay lets the registry
+      // (and stoppingAgents) fully settle after this stop returns before the
+      // fresh start re-enters, removing the immediate-re-entry race.
+      this.pendingRestartFirstSeen.delete(name);
       console.log(`[agent-manager] Honoring queued restart for ${name}`);
-      this.startAgent(name, '').catch(err =>
+      setTimeout(() => this.startAgent(name, '').catch(err =>
         console.error(`[agent-manager] Queued restart failed for ${name}:`, err),
-      );
+      ), 5000);
     }
   }
 

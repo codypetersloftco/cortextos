@@ -396,23 +396,97 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
     expect(ap.getStatus().status).toBe('halted');
   });
 
-  it('does not trigger CRASH_LOOP when no crash_window is configured (backward compat)', async () => {
+  it('applies the code-default window (600s/3) when no crash_window is configured (OOM Wave 2 Patch 2)', async () => {
+    // CONTRACT CHANGE (OOM Wave 2, Patch 2): a no-config agent USED to fall back
+    // to the daily counter only (so 3 crashes were just normal recovery). The
+    // root cause of the 2026-06-05 OOM was exactly this — crash_window unset
+    // fleet-wide left the CrashLoopPauser dead. The code now defaults the window
+    // to 600s/3, so a no-config agent halts on the 3rd crash in-window. This
+    // test pins the NEW behavior (and replaces the old backward-compat one).
     const ap = new AgentProcess('alice', mockEnv, {
-      max_crashes_per_day: 5,
+      max_crashes_per_day: 5, // high daily budget — proves the WINDOW halts, not the counter
     });
     await ap.start();
 
-    // 3 crashes — without crash_window, these are just normal crash recovery
-    for (let i = 0; i < 3; i++) {
-      capturedOnExit!(1, 0);
-      if (ap.getStatus().status !== 'halted') {
-        mockPty.spawn.mockClear();
-        mockPty.onExit.mockClear();
-        capturedOnExit = null;
-        await ap.start();
-      }
-    }
-    // Should be 'crashed' (recovering), NOT 'halted', because daily max is 5
-    expect(ap.getStatus().status).not.toBe('halted');
+    capturedOnExit!(1, 0);
+    expect(ap.getStatus().status).toBe('crashed'); // crash 1/3
+
+    mockPty.spawn.mockClear();
+    mockPty.onExit.mockClear();
+    capturedOnExit = null;
+    await ap.start();
+    capturedOnExit!(1, 0);
+    expect(ap.getStatus().status).toBe('crashed'); // crash 2/3
+
+    mockPty.spawn.mockClear();
+    mockPty.onExit.mockClear();
+    capturedOnExit = null;
+    await ap.start();
+    capturedOnExit!(1, 0);
+    // 3rd crash within the default 600s window → CRASH_LOOP → halted, even
+    // though the daily budget (5) is not exhausted.
+    expect(ap.getStatus().status).toBe('halted');
+  });
+
+  it('crash_window with only max_crashes (no seconds) uses the 600s default, not a NaN window (Patch 2)', async () => {
+    // A NaN window would make `crashWindowMs > 0` false and the CrashLoopPauser
+    // skip entirely — 3 crashes would NOT halt. Reaching 'halted' proves the
+    // absent `seconds` fell back to 600s rather than producing NaN.
+    const ap = new AgentProcess('alice', mockEnv, { crash_window: { max_crashes: 3 } });
+    await ap.start();
+
+    capturedOnExit!(1, 0);
+    mockPty.spawn.mockClear(); mockPty.onExit.mockClear(); capturedOnExit = null;
+    await ap.start();
+    capturedOnExit!(1, 0);
+    mockPty.spawn.mockClear(); mockPty.onExit.mockClear(); capturedOnExit = null;
+    await ap.start();
+    capturedOnExit!(1, 0);
+    expect(ap.getStatus().status).toBe('halted');
+  });
+});
+
+describe('AgentProcess — OOM Wave 2 (spawn-fail accounting + memory governor)', () => {
+  it('spawn failure routes through crash accounting, not a silent crashed-park (Patch 3)', async () => {
+    // Patch 7 surfaces ConPTY/node-pty failures as a thrown error from
+    // pty.spawn(); Patch 3 routes that throw through handleExit(1) so it is
+    // counted, windowed, and audit-logged — not silently parked.
+    mockPty.spawn.mockRejectedValueOnce(new Error('node-pty spawn failed for claude.cmd: boom'));
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    expect(ap.getStatus().status).toBe('crashed');
+    expect(ap.getStatus().crashCount).toBe(1); // counted, unlike the old silent path
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    // Normalize separators so this assertion is correct on Windows (\) and POSIX (/).
+    expect(String(fsMocks.appendFileSync.mock.calls[0][0]).replace(/\\/g, '/')).toContain('/logs/alice/restarts.log');
+    expect(String(fsMocks.appendFileSync.mock.calls[0][1])).toMatch(/\] CRASH: exit_code=1 /);
+  });
+
+  it('memory-governor deferral is a clean no-op: no PTY, no crash count, no log, no exit wiring (Patch 6)', async () => {
+    const gate = vi.fn().mockReturnValue({ ok: false, reason: 'free_mem=200MB below 1024MB', retryMs: 60000 });
+    const ap = new AgentProcess('alice', mockEnv, {}, undefined, gate);
+
+    await ap.start();
+
+    expect(gate).toHaveBeenCalled();
+    // Parks in 'crashed' (the only recoverable retry state) but is NOT a crash:
+    expect(ap.getStatus().status).toBe('crashed');
+    expect(ap.getStatus().crashCount).toBe(0);      // host pressure ≠ agent crash
+    expect(mockPty.spawn).not.toHaveBeenCalled();   // no PTY allocated
+    expect(fsMocks.appendFileSync).not.toHaveBeenCalled(); // nothing logged
+    expect(capturedOnExit).toBeNull();              // no onExit handler wired
+  });
+
+  it('permits the spawn normally when the governor returns ok (Patch 6)', async () => {
+    const gate = vi.fn().mockReturnValue({ ok: true });
+    const ap = new AgentProcess('alice', mockEnv, {}, undefined, gate);
+
+    await ap.start();
+
+    expect(gate).toHaveBeenCalled();
+    expect(ap.getStatus().status).toBe('running');
+    expect(mockPty.spawn).toHaveBeenCalledTimes(1);
   });
 });
