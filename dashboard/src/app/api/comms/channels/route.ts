@@ -214,7 +214,12 @@ export async function GET(request: NextRequest) {
   // Self-limiting: once the root is empty, subsequent polls no-op.
   try {
     const userInbox = path.join(inboxBase, identity.canonicalUser);
-    if (fs.existsSync(userInbox)) {
+    // STRUCTURAL SAFETY: never drain an inbox owned by a REAL agent — a live
+    // fast-checker consumes it, and draining would steal undelivered messages.
+    // The user pseudo-agent is by definition NOT in the agent roster; if
+    // ADMIN_USERNAME is ever misconfigured to an agent name, skip the drain
+    // entirely rather than rely on that config being correct.
+    if (!identity.agents.has(identity.canonicalUser) && fs.existsSync(userInbox)) {
       const pending = fs.readdirSync(userInbox).filter(f => f.endsWith('.json') && !f.startsWith('.'));
       if (pending.length > 0) {
         const histLog = path.join(ctxRoot, 'logs', 'message-history.jsonl');

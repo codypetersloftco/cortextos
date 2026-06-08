@@ -228,6 +228,33 @@ describe('GET /api/comms/channels', () => {
     expect(fs.existsSync(path.join(inboxDir, fname))).toBe(true);
     expect(fs.existsSync(path.join(inboxDir, 'processed', fname))).toBe(false);
   });
+
+  // STRUCTURAL GUARD (defense-in-depth): the never-drain-a-real-agent-inbox
+  // safety must not DEPEND on ADMIN_USERNAME being a non-agent name. If the
+  // canonical user is ever misconfigured to a REAL agent name, the drain must
+  // skip entirely — otherwise it would steal that agent's inbox (this bug,
+  // inverted). Proves the identity.agents.has(canonicalUser) guard.
+  it('skips the drain entirely when the canonical user collides with a real agent name', async () => {
+    const saved = process.env.ADMIN_USERNAME;
+    process.env.ADMIN_USERNAME = 'boris'; // misconfig: user identity == a roster agent
+    try {
+      const inboxDir = path.join(rootTmp, 'inbox', 'boris');
+      fs.mkdirSync(inboxDir, { recursive: true });
+      const fname = '2-1780000004000-from-nick-vvvvv.json';
+      fs.writeFileSync(
+        path.join(inboxDir, fname),
+        JSON.stringify({ id: '1780000004000-nick-vvvvv', from: 'nick', to: 'boris', priority: 'normal', timestamp: new Date().toISOString(), text: 'must not be drained', reply_to: null }),
+      );
+
+      await channels.GET(makeRequest('/api/comms/channels'));
+
+      // canonicalUser is a real agent -> guard skips the drain; file stays put
+      expect(fs.existsSync(path.join(inboxDir, fname))).toBe(true);
+      expect(fs.existsSync(path.join(inboxDir, 'processed', fname))).toBe(false);
+    } finally {
+      process.env.ADMIN_USERNAME = saved;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
