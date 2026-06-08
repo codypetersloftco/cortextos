@@ -9,7 +9,7 @@ vi.mock('child_process', () => ({
 }));
 
 import { EventEmitter } from 'events';
-import { readMaxCrashesPerDay, notifyAgents, classifyFromMarkers, isEphemeralWorkerExit, readHookInput } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, classifyFromMarkers, isEphemeralWorkerExit, consumeEphemeralWorkerMarker, readHookInput } from '../../../src/hooks/hook-crash-alert';
 import { clearEndMarkers } from '../../../src/bus/heartbeat';
 
 describe('readMaxCrashesPerDay', () => {
@@ -227,6 +227,36 @@ describe('isEphemeralWorkerExit (marker-only gate)', () => {
 
   it('false: cwd undefined', () => {
     expect(isEphemeralWorkerExit(undefined)).toBe(false);
+  });
+});
+
+describe('consumeEphemeralWorkerMarker (last-reader cleanup)', () => {
+  let tmp: string;
+  const MARKER = '.cortextos-ephemeral-worker';
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-consume-'));
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // The daemon no longer removes the marker on worker exit (it raced this hook).
+  // This hook is the marker's last reader and removes it AFTER reading, so a
+  // stale marker can't mislead a future session that reuses the worker dir.
+  it('removes the marker after the hook has read it', () => {
+    writeFileSync(join(tmp, MARKER), 'prestage-shippers-worker 2026-06-08', 'utf-8');
+    expect(isEphemeralWorkerExit(tmp)).toBe(true); // read first
+    consumeEphemeralWorkerMarker(tmp);             // then consume
+    expect(existsSync(join(tmp, MARKER))).toBe(false);
+  });
+
+  it('is a safe no-op when the marker is absent', () => {
+    expect(() => consumeEphemeralWorkerMarker(tmp)).not.toThrow();
+  });
+
+  it('is a safe no-op when cwd is undefined', () => {
+    expect(() => consumeEphemeralWorkerMarker(undefined)).not.toThrow();
   });
 });
 

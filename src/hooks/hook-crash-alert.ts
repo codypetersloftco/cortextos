@@ -305,6 +305,22 @@ export function isEphemeralWorkerExit(cwd: string | undefined): boolean {
   }
 }
 
+/**
+ * Remove the ephemeral-worker marker. This hook is the marker's LAST reader, so
+ * it owns cleanup: the daemon deliberately no longer removes the marker on
+ * worker exit (that raced this hook — see worker-process.ts onExit). Consuming
+ * it here, AFTER isEphemeralWorkerExit has read it, prevents a stale marker from
+ * misclassifying a future session that reuses the worker's dir. Best-effort.
+ */
+export function consumeEphemeralWorkerMarker(cwd: string | undefined): void {
+  if (!cwd) return;
+  try {
+    unlinkSync(join(cwd, EPHEMERAL_WORKER_MARKER));
+  } catch {
+    /* already gone / never written — fine */
+  }
+}
+
 async function main(): Promise<void> {
   const agentName = process.env.CTX_AGENT_NAME;
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
@@ -353,6 +369,11 @@ async function main(): Promise<void> {
   if (endType === 'crash' && isEphemeralWorkerExit(hookInput.cwd)) {
     endType = 'worker-complete';
     reason = 'ephemeral -p worker exit';
+    // Consume the marker now that we've read it. The daemon no longer removes
+    // it on exit (that raced this read), so this hook owns cleanup as the
+    // last reader — keeps a stale marker from misclassifying a later session
+    // that reuses this worker dir.
+    consumeEphemeralWorkerMarker(hookInput.cwd);
   }
 
   // If no marker matched but the stdout tail shows a rate-limit signature,

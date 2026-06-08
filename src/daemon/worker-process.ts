@@ -93,7 +93,14 @@ export class WorkerProcess {
 
     this.pty.onExit((code) => {
       this.clearWatchdog();
-      this.removeMarker();
+      // NOTE: deliberately do NOT removeMarker() here. This onExit fires
+      // concurrently with the SessionEnd crash-alert hook (a separate process)
+      // which reads the marker to classify the exit as a worker-complete (not a
+      // crash). Removing the marker here raced that read — when the daemon won,
+      // a clean ephemeral exit was mis-logged type=crash (task_1780941278942).
+      // The hook is the marker's LAST reader and now owns its removal (consumes
+      // it after reading). Cleanup still happens on terminate() and is
+      // overwritten by writeMarker() on the next spawn in the same dir.
       this.exitCode = code;
       this.status = code === 0 ? 'completed' : 'failed';
       this.log(`Exited with code ${code} → ${this.status}`);

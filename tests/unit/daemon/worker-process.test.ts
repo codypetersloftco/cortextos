@@ -210,11 +210,15 @@ describe('WorkerProcess', () => {
       expect(writeOrder).toBeLessThan(spawnOrder);
     });
 
-    it('removes the marker on normal exit', async () => {
+    it('does NOT remove the marker on normal exit (the SessionEnd hook consumes it — removing here raced the hook and mis-logged clean exits as crashes)', async () => {
       const w = new WorkerProcess('w-mark2', '/tmp/proj', undefined);
       await w.spawn(mockEnv, 'task');
       capturedOnExit!(0);
-      expect(vi.mocked(mockUnlinkSync)).toHaveBeenCalledWith(
+      // The marker must SURVIVE the daemon's onExit so the SessionEnd crash-alert
+      // hook (a separate process firing concurrently) can still read it and
+      // classify the exit as worker-complete. The hook is the marker's last
+      // reader and now owns its removal. (Race fix: task_1780941278942.)
+      expect(vi.mocked(mockUnlinkSync)).not.toHaveBeenCalledWith(
         join('/tmp/proj', '.cortextos-ephemeral-worker'),
       );
     });
