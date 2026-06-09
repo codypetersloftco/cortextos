@@ -4,12 +4,65 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 
+export type DashboardMode = 'dev' | 'start';
+
+// Extract the dashboard run-mode from a PM2 dump file's JSON content.
+// The dump is an array of process snapshots; args may be an array (real
+// `pm2 dump` shape), a string, or live under pm2_env. Returns null when the
+// dump holds no usable dashboard entry — callers fall through to the default.
+export function parseDashboardModeFromDump(dumpContent: string): DashboardMode | null {
+  try {
+    const procs = JSON.parse(dumpContent);
+    if (!Array.isArray(procs)) return null;
+    for (const p of procs) {
+      if (!p || p.name !== 'cortextos-dashboard') continue;
+      const raw = p.args ?? p.pm2_env?.args;
+      const args: string[] = Array.isArray(raw)
+        ? raw.map(String)
+        : typeof raw === 'string'
+          ? raw.split(/\s+/)
+          : [];
+      if (args.includes('dev')) return 'dev';
+      if (args.includes('start')) return 'start';
+    }
+  } catch {
+    // Malformed dump — treat as no detection.
+  }
+  return null;
+}
+
+// Precedence: explicit --dashboard-mode flag > live mode from the PM2 dump >
+// 'start'. Reading the dump FILE (instead of spawning `pm2 jlist`) avoids the
+// Node 24 .cmd-shim spawn guard and works when pm2 isn't on PATH. A missing or
+// unreadable dump falls through to the default — never an error. Regenerating
+// with a hardcoded 'start' while the live dashboard runs `next dev` would
+// silently revert the run-mode on the next `pm2 start ecosystem.config.js`;
+// next-start needs a fresh build and has historically 404'd.
+export function resolveDashboardMode(flag: string | undefined, dumpPath: string): DashboardMode {
+  if (flag === 'dev' || flag === 'start') return flag;
+  try {
+    if (existsSync(dumpPath)) {
+      const detected = parseDashboardModeFromDump(readFileSync(dumpPath, 'utf-8'));
+      if (detected) return detected;
+    }
+  } catch {
+    // Unreadable dump (permissions, EISDIR, mid-write corruption) — default.
+  }
+  return 'start';
+}
+
 export const ecosystemCommand = new Command('ecosystem')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--org <name>', 'Organization name (auto-detected if not specified)')
   .option('--output <path>', 'Output file', 'ecosystem.config.js')
+  .option('--dashboard-mode <mode>', "Dashboard run-mode: 'dev' or 'start' (default: preserve live mode from the PM2 dump, else 'start')")
   .description('Generate PM2 ecosystem.config.js from agent configs')
-  .action(async (options: { instance: string; org?: string; output: string }) => {
+  .action(async (options: { instance: string; org?: string; output: string; dashboardMode?: string }) => {
+    if (options.dashboardMode !== undefined && options.dashboardMode !== 'dev' && options.dashboardMode !== 'start') {
+      console.error(`Invalid --dashboard-mode '${options.dashboardMode}'. Use 'dev' or 'start'.`);
+      process.exitCode = 1;
+      return;
+    }
     const ctxRoot = join(homedir(), '.cortextos', options.instance);
     // BUG-035 (companion fix): same project-root discovery as enable-agent.ts
     // so `cortextos ecosystem` works from outside ~/cortextos.
@@ -93,7 +146,12 @@ export const ecosystemCommand = new Command('ecosystem')
     const isWindows = process.platform === 'win32';
     const nextBin = join(dashboardDir, 'node_modules', 'next', 'dist', 'bin', 'next');
     const dashboardScript = isWindows && existsSync(nextBin) ? nextBin : 'npm';
-    const dashboardArgs = isWindows && existsSync(nextBin) ? 'start' : 'run start';
+    // Run-mode preservation: regenerating must not silently flip a live
+    // `next dev` dashboard to `next start` (or vice versa). Precedence:
+    // --dashboard-mode flag > live mode from PM2's dump file > 'start'.
+    const pm2DumpPath = join(process.env.PM2_HOME || join(homedir(), '.pm2'), 'dump.pm2');
+    const dashboardMode = resolveDashboardMode(options.dashboardMode, pm2DumpPath);
+    const dashboardArgs = isWindows && existsSync(nextBin) ? dashboardMode : `run ${dashboardMode}`;
 
     // windowsHide: stops PM2 from attaching a visible "next-server" console
     // window to the dashboard process at boot on Windows. PM2's default
@@ -174,7 +232,7 @@ module.exports = {
 `;
 
     writeFileSync(options.output, content, 'utf-8');
-    console.log(`Generated ${options.output} with daemon (manages ${agents.length} agents)${hasDashboard ? ' + dashboard' : ''}`);
+    console.log(`Generated ${options.output} with daemon (manages ${agents.length} agents)${hasDashboard ? ` + dashboard (mode: ${dashboardMode})` : ''}`);
     console.log('\nStart with:');
     console.log(`  pm2 start ${options.output}`);
     console.log('  pm2 save');
