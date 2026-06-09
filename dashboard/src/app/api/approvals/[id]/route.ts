@@ -113,7 +113,7 @@ export async function PATCH(
     const result = spawnSync(
       'bash',
       [path.join(frameworkRoot, 'bus', 'update-approval.sh'), ...args],
-      { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe' },
+      { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe', windowsHide: true },
     );
     if (result.status !== 0) {
       throw new Error(result.stderr || result.stdout || 'update-approval.sh failed');

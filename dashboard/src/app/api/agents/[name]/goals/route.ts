@@ -122,6 +122,7 @@ export async function PATCH(
       const child = spawn(process.execPath, [distCliPath, 'goals', 'generate-md', '--agent', name, '--org', org], {
         env: { ...process.env, CTX_FRAMEWORK_ROOT: frameworkRoot },
         stdio: 'pipe',
+        windowsHide: true,
       });
       child.on('error', (err) => console.error('[api/agents/goals] generate-md error:', err));
       child.on('exit', (code) => { if (code !== 0) console.error(`[api/agents/goals] generate-md exited ${code}`); });

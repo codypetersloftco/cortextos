@@ -85,7 +85,7 @@ export async function PATCH(request: NextRequest) {
       if (process.env.CTX_ROOT) childEnv.CTX_ROOT = process.env.CTX_ROOT;
       if (process.env.CTX_INSTANCE_ID) childEnv.CTX_INSTANCE_ID = process.env.CTX_INSTANCE_ID;
       import('child_process').then(({ spawn }) => {
-        const child = spawn('bash', [syncScript, '--org', org], { env: childEnv, stdio: 'pipe' });
+        const child = spawn('bash', [syncScript, '--org', org], { env: childEnv, stdio: 'pipe', windowsHide: true });
         child.on('error', (err) => console.error('[api/org/config] sync-org-config.sh spawn error:', err));
         child.on('exit', (code) => { if (code !== 0) console.error(`[api/org/config] sync-org-config.sh exited ${code}`); });
       }).catch((err) => console.error('[api/org/config] child_process import failed:', err));

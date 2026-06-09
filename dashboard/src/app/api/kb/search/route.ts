@@ -156,6 +156,7 @@ export async function GET(request: NextRequest) {
         timeout: 30000,
         encoding: 'utf-8',
         env: env as NodeJS.ProcessEnv,
+        windowsHide: true,
       });
     } catch (e: unknown) {
       // On non-zero exit, try to recover stdout (partial output)
@@ -182,6 +183,7 @@ export async function GET(request: NextRequest) {
         timeout: 15000,
         encoding: 'utf-8',
         env: env as NodeJS.ProcessEnv,
+        windowsHide: true,
       });
     } catch (e: unknown) {
       stdout = (e as { stdout?: string }).stdout || '';

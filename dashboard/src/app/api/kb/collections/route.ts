@@ -94,6 +94,7 @@ export async function GET(request: NextRequest) {
       timeout: 15000,
       encoding: 'utf-8',
       env: env as NodeJS.ProcessEnv,
+      windowsHide: true,
     });
   } catch (err: unknown) {
     // ChromaDB may crash mid-output (e.g. pickle corruption) after printing some collections.

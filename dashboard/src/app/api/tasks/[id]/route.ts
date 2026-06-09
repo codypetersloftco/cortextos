@@ -189,7 +189,7 @@ export async function PUT(
             'normal',
             notifyMsg,
           ],
-          { timeout: 5000, stdio: 'pipe', env: { ...process.env, CTX_FRAMEWORK_ROOT: getFrameworkRoot(), CTX_ROOT: getCTXRoot(), CTX_INSTANCE_ID: process.env.CTX_INSTANCE_ID ?? 'default', CTX_AGENT_NAME: 'dashboard', CTX_ORG: task?.org || '' } },
+          { timeout: 5000, stdio: 'pipe', windowsHide: true, env: { ...process.env, CTX_FRAMEWORK_ROOT: getFrameworkRoot(), CTX_ROOT: getCTXRoot(), CTX_INSTANCE_ID: process.env.CTX_INSTANCE_ID ?? 'default', CTX_AGENT_NAME: 'dashboard', CTX_ORG: task?.org || '' } },
         );
       } catch { /* non-fatal */ }
     }
@@ -273,7 +273,7 @@ export async function PATCH(
       spawnResult = spawnSync(
         'bash',
         [path.join(frameworkRoot, 'bus', 'complete-task.sh'), id, summaryArg],
-        { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe' },
+        { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe', windowsHide: true },
       );
     } else {
       // Use update-task.sh for other status changes. All args are positional
@@ -285,7 +285,7 @@ export async function PATCH(
       spawnResult = spawnSync(
         'bash',
         [path.join(frameworkRoot, 'bus', 'update-task.sh'), ...args],
-        { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe' },
+        { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe', windowsHide: true },
       );
     }
     if (spawnResult.status !== 0) {
@@ -315,7 +315,7 @@ export async function PATCH(
               path.join(frameworkRoot, 'dist', 'cli.js'),
               'bus', 'send-message', createdBy, 'normal', msg,
             ],
-            { timeout: 5000, stdio: 'pipe', env },
+            { timeout: 5000, stdio: 'pipe', windowsHide: true, env },
           );
         }
       } catch { /* non-fatal */ }

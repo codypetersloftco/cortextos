@@ -119,6 +119,7 @@ export async function POST(request: NextRequest) {
       encoding: 'utf-8',
       timeout: 10000,
       env,
+      windowsHide: true,
     });
 
     // Trigger sync so subsequent reads reflect the new task

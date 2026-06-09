@@ -138,6 +138,7 @@ export async function PATCH(
             env: { ...process.env, CTX_FRAMEWORK_ROOT: frameworkRoot, CTX_AGENT_NAME: name },
             timeout: 5000,
             stdio: 'pipe',
+            windowsHide: true,
           },
         );
       }

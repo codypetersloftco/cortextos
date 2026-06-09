@@ -25,7 +25,7 @@ function logEvent(category: string, data: Record<string, unknown>): void {
     spawnSync(
       'bash',
       [path.join(frameworkRoot, 'bus', 'log-event.sh'), 'action', category, 'info', JSON.stringify(data)],
-      { timeout: 5000, stdio: 'pipe' },
+      { timeout: 5000, stdio: 'pipe', windowsHide: true },
     );
   } catch {
     // Event logging is best-effort - never fail the action

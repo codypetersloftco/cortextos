@@ -130,7 +130,7 @@ export async function PUT(
           'normal',
           'Crons updated via dashboard. Re-read config.json and update your /loop crons.',
         ],
-        { timeout: 5000, stdio: 'pipe' },
+        { timeout: 5000, stdio: 'pipe', windowsHide: true },
       );
     } catch {
       // Non-fatal: agent might be offline
