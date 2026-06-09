@@ -109,9 +109,13 @@ export class FastChecker {
     // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
     const agentName = this.agent.name;
+    // Spawn node + dist/cli.js directly: Node 24's CVE-2024-27980 guard cannot
+    // resolve the bare `cortextos` .cmd shim without shell:true, and a shell
+    // spawn from the windowless daemon pops a visible console on Windows.
+    const cliJs = join(this.frameworkRoot, 'dist', 'cli.js');
     this.heartbeatTimer = setInterval(() => {
       const ts = new Date().toISOString();
-      execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], { windowsHide: true }, (err) => {
+      execFile(process.execPath, [cliJs, 'bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], { windowsHide: true }, (err) => {
         if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
       });
     }, HEARTBEAT_INTERVAL_MS);

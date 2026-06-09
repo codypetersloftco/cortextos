@@ -31,6 +31,7 @@ interface ChildSpawnOptions {
   env?: Record<string, string>;
   stdio?: Array<'pipe' | 'ignore' | 'inherit'>;
   shell?: boolean;
+  windowsHide?: boolean;
 }
 
 type SpawnFn = (file: string, args: string[], options: ChildSpawnOptions) => ChildHandle;
@@ -454,6 +455,7 @@ export class CodexAppServerPTY {
         env: this.buildEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
         shell,
+        windowsHide: true,
       });
 
       this._child = child;

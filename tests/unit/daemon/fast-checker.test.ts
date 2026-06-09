@@ -796,8 +796,9 @@ describe('FastChecker', () => {
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       expect(execFile).toHaveBeenCalledWith(
-        'cortextos',
-        expect.arrayContaining(['bus', 'update-heartbeat', expect.stringContaining('[watchdog] my-agent alive — idle session')]),
+        process.execPath,
+        expect.arrayContaining([expect.stringContaining('cli.js'), 'bus', 'update-heartbeat', expect.stringContaining('[watchdog] my-agent alive — idle session')]),
+        expect.objectContaining({ windowsHide: true }),
         expect.any(Function),
       );
       checker.stop();
@@ -827,8 +828,9 @@ describe('FastChecker', () => {
       checker.start();
       await vi.advanceTimersByTimeAsync(20 * 1000);
       expect(execFile).not.toHaveBeenCalledWith(
-        'cortextos',
+        process.execPath,
         expect.arrayContaining([expect.stringContaining('[watchdog]')]),
+        expect.objectContaining({ windowsHide: true }),
         expect.any(Function),
       );
       checker.stop();
