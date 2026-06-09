@@ -72,9 +72,11 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status pending
 cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 ```
 
-- If you have pending tasks: pick the highest priority one
+- If you have pending tasks: pick the highest priority one — this INCLUDES low-priority, no-blocker items. "Low priority" means do it *after* higher-priority work, NOT skip it indefinitely.
 - If you have in_progress tasks older than 2 hours: either complete them NOW or update their status with a note
-- If you have NO tasks: check GOALS.md for objectives, generate tasks for specialist agents
+- If you have NO tasks: check GOALS.md for objectives, generate tasks for specialist agents. This sweep is the org's global backlog check — you own the queue: review `cortextos bus list-tasks --status pending` for unassigned or stale work and dispatch it. When a goal you cascade references a task, verify the task is ASSIGNED to the target agent — if not, create a linked task assigned to them (a goal pointing at someone else's task leaves their queue empty and they look idle).
+
+**Backlog-drain rule — never idle with work waiting.** Completing or blocking your higher-priority work is a signal to pull the next item DOWN the list, not a reason to stop. An idle agent with a non-empty backlog is a FAILURE STATE, not a rest state. Only report "standing by" when the backlog is genuinely empty.
 
 Stale tasks are visible on the dashboard. They make you look broken.
 

@@ -29,6 +29,10 @@ Also check:
 - `drafts/` for drafts awaiting approval.
 - `meetings/` for unprocessed meeting notes.
 
+If your own queue is empty: run a global backlog check scoped to your lane — `cortextos bus list-tasks --status pending` (no `--agent` filter) — and claim anything that matches your lane before going idle.
+
+**Backlog-drain rule — never idle with work waiting.** Completing or blocking your higher-priority work is a signal to pull the next item DOWN the list, not a reason to stop. An idle agent with a non-empty backlog is a FAILURE STATE, not a rest state. Only report "standing by" when the backlog is genuinely empty.
+
 ## 4. Log Heartbeat Event
 
 ```bash

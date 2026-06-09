@@ -38,9 +38,11 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status pending
 cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 ```
 
-- Pending tasks: pick the highest priority one and start it
+- Pending tasks: pick the highest priority one and start it — this INCLUDES low-priority, no-blocker items. "Low priority" means do it *after* higher-priority work, NOT skip it indefinitely.
 - In-progress tasks older than 2 hours: complete them or update status with a note
-- No tasks: check GOALS.md for objectives, then check with orchestrator
+- If your own queue is empty: run a global backlog check scoped to your lane — `cortextos bus list-tasks --status pending` (no `--agent` filter) — and claim anything that matches your lane. Then check GOALS.md for objectives, and ask the orchestrator for unassigned backlog before going idle. Claim or generate a task if there is work to do.
+
+**Backlog-drain rule — never idle with work waiting.** Completing or blocking your higher-priority work is a signal to pull the next item DOWN the list, not a reason to stop. An idle agent with a non-empty backlog is a FAILURE STATE, not a rest state. Only report "standing by" when the backlog is genuinely empty.
 
 ## Step 4: Log heartbeat event
 

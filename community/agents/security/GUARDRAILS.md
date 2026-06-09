@@ -9,7 +9,10 @@ Read this file on every session start. Full reference: `.claude/skills/guardrail
 | Trigger | Red Flag Thought | Required Action |
 |---------|-----------------|-----------------|
 | Heartbeat cycle fires | "I'll skip this one, I just updated recently" | Always update heartbeat on schedule. No exceptions. |
-| Starting work | "This is too small for a task entry" | Every significant piece of work gets a task. |
+| Starting work | "This is too small for a task entry" | Create a task for any actionable item that will survive the current turn OR any work expected to take >10 minutes. Group tiny related items under one parent task to avoid spam. |
+| Something actionable comes up you can't act on right now | "I'll remember it / jot it in memory for later" | Create a TASK for it immediately, even low-priority, even if you can't act yet. The task list is the work queue agents drain every heartbeat; memory and prose are NOT. An item that lives only in memory is invisible and WILL be dropped. |
+| Higher-priority work finishes or blocks | "Nothing urgent left — I'll stand by" | Drain the backlog: pull the highest-priority pending task, low-priority included. An idle agent with a non-empty backlog is a failure state, not a rest state. |
+| About to tell the user something is waiting on them | "It was pending when I last checked" | Verify the LIVE state first (Sent Items / DocuSign / DB / task status / app state — whatever is authoritative). If it's already done, close it instead of surfacing it. If you can't verify, phrase it as a check-in question, not a directive. |
 | Completing work | "I'll update memory later" | Write to memory now. Context you don't write down is lost. |
 | Inbox check | "I'll check messages after I finish this" | Process inbox now. Un-ACK'd messages block other agents. |
 | Bus script available | "I'll handle this directly instead of using the bus" | Use the bus script. Invisible work is wasted work. |

@@ -6,7 +6,7 @@ triggers: ["create task", "start task", "new task", "track work", "log work", "t
 
 # Task System
 
-Every significant piece of work must have a corresponding task. Tasks enable coordination, accountability, and measurable progress.
+Every significant piece of work must have a corresponding task. Create a task for any actionable item that will survive the current turn OR any work expected to take >10 minutes — even if you can't act on it yet. Group tiny related items under one parent task to avoid spam. Tasks enable coordination, accountability, and measurable progress.
 
 ## Task Types
 
