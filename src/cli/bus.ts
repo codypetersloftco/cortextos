@@ -1547,66 +1547,30 @@ busCommand
   .description('Discover available skills for the current agent')
   .option('--format <fmt>', 'Output format: json|text', 'json')
   .action((opts: { format?: string }) => {
-    const { existsSync, readdirSync, readFileSync } = require('fs');
+    const { existsSync, readFileSync } = require('fs');
     const { join } = require('path');
+    const { discoverSkills } = require('../bus/skill-discovery.js');
     const env = resolveEnv();
     const frameworkRoot = env.frameworkRoot || process.cwd();
     const agentDir = env.agentDir || process.cwd();
 
-    // Read template from config.json
+    // Read template + runtime from config.json. template is null for every
+    // live agent (add-agent never persists it), so discoverSkills derives a
+    // default from runtime — codex agents previously got Total: 0 here
+    // because only the .claude/skills layout was scanned and the template
+    // scan was gated on the always-null template field.
     let template = '';
+    let runtime = '';
     const configFile = join(agentDir, 'config.json');
     if (existsSync(configFile)) {
-      try { template = JSON.parse(readFileSync(configFile, 'utf-8')).template ?? ''; } catch { /* skip */ }
-    }
-
-    // Parse YAML frontmatter from SKILL.md
-    function parseSkillFrontmatter(filePath: string): { name: string; description: string } | null {
       try {
-        const content = readFileSync(filePath, 'utf-8');
-        const lines = content.split('\n');
-        let inFrontmatter = false;
-        let name = '', description = '';
-        for (const line of lines) {
-          if (line.trim() === '---') {
-            if (inFrontmatter) break;
-            inFrontmatter = true;
-            continue;
-          }
-          if (!inFrontmatter) continue;
-          const nm = line.match(/^name:\s*['"]?(.+?)['"]?\s*$/);
-          if (nm) name = nm[1];
-          const dm = line.match(/^description:\s*['"]?(.+?)['"]?\s*$/);
-          if (dm) description = dm[1];
-        }
-        return name ? { name, description } : null;
-      } catch { return null; }
+        const config = JSON.parse(readFileSync(configFile, 'utf-8'));
+        template = config.template ?? '';
+        runtime = config.runtime ?? '';
+      } catch { /* skip */ }
     }
 
-    type SkillInfo = { name: string; description: string; path: string; source: string };
-
-    // Scan a skills directory, returns map of name -> skill info
-    function scanSkillsDir(dir: string, source: string): Map<string, SkillInfo> {
-      const map = new Map<string, SkillInfo>();
-      if (!existsSync(dir)) return map;
-      for (const entry of readdirSync(dir)) {
-        const skillFile = join(dir, entry, 'SKILL.md');
-        if (!existsSync(skillFile)) continue;
-        const parsed = parseSkillFrontmatter(skillFile);
-        if (parsed) map.set(parsed.name, { ...parsed, path: skillFile, source });
-      }
-      return map;
-    }
-
-    // Merge in priority order: framework < template < agent (agent wins)
-    const merged = new Map<string, SkillInfo>();
-    for (const [k, v] of scanSkillsDir(join(frameworkRoot, '.claude', 'skills'), 'framework')) merged.set(k, v);
-    if (template) {
-      for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'templates', template, '.claude', 'skills'), `template:${template}`)) merged.set(k, v);
-    }
-    for (const [k, v] of scanSkillsDir(join(agentDir, '.claude', 'skills'), 'agent')) merged.set(k, v);
-
-    const skills = Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name));
+    const skills = discoverSkills({ agentDir, frameworkRoot, template, runtime });
 
     if (opts.format === 'text') {
       console.log(`Available skills for ${env.agentName}:\n`);
