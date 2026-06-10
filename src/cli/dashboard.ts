@@ -166,7 +166,7 @@ export const dashboardCommand = new Command('dashboard')
     // On Windows, npx is a .cmd wrapper requiring shell resolution.
     // Pass as single string to avoid Node.js DEP0190 deprecation warning.
     const child = IS_WINDOWS
-      ? spawn(['npx', ...startArgs].join(' '), { cwd: dashboardDir, stdio: ['ignore', logFd, logFd], env: dashEnv, shell: true, detached: true })
+      ? spawn(['npx', ...startArgs].join(' '), { cwd: dashboardDir, stdio: ['ignore', logFd, logFd], env: dashEnv, shell: true, detached: true, windowsHide: true })
       : spawn('npx', startArgs, { cwd: dashboardDir, stdio: ['ignore', logFd, logFd], env: dashEnv, detached: true });
 
     // Detach the child from our event loop so parent exit does not take
