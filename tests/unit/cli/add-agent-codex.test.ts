@@ -111,6 +111,50 @@ describe('PR-02: add-agent --runtime codex-app-server', () => {
     expect(cfg.agent_name).toBe('codex-cfg');
   });
 
+  it('persists the RESOLVED template (agent-codex), not the raw --template default', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await addAgentCommand.parseAsync([
+      'node', 'cli', 'codex-tpl', '--runtime', 'codex-app-server',
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const cfg = JSON.parse(readFileSync(
+      join(tempRoot, 'orgs', 'testorg', 'agents', 'codex-tpl', 'config.json'), 'utf-8'));
+    // The raw option default is 'agent'; persisting that would make skill
+    // discovery (resolveTemplate) disagree with the bootstrap this agent got.
+    expect(cfg.template).toBe('agent-codex');
+  });
+
+  it('persists template=agent for a default claude-code agent', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await addAgentCommand.parseAsync([
+      'node', 'cli', 'claude-tpl',
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const cfg = JSON.parse(readFileSync(
+      join(tempRoot, 'orgs', 'testorg', 'agents', 'claude-tpl', 'config.json'), 'utf-8'));
+    expect(cfg.template).toBe('agent');
+  });
+
+  it('honors and persists an explicit --template on a claude-code agent', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await addAgentCommand.parseAsync([
+      'node', 'cli', 'claude-analyst', '--template', 'analyst',
+      '--org', 'testorg', '--instance', 'pr02-test',
+    ]);
+
+    const cfg = JSON.parse(readFileSync(
+      join(tempRoot, 'orgs', 'testorg', 'agents', 'claude-analyst', 'config.json'), 'utf-8'));
+    expect(cfg.template).toBe('analyst');
+  });
+
   it('copies the 23 codex skills into plugins/cortextos-agent-skills/skills', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
