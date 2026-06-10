@@ -789,10 +789,24 @@ describe('FastChecker', () => {
     beforeEach(() => { vi.useFakeTimers(); });
     afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
+    // These tests verify ONLY the heartbeatTimer. start()'s poll loop wakes on
+    // every fake tick, so advancing 50 minutes runs ~1500 pollCycle iterations
+    // of REAL fs I/O inside advanceTimersByTimeAsync — wall-clock seconds that
+    // flap past the 10s test timeout under parallel-worker load (the 2026-06-09
+    // 10013ms flake). Stub the poll internals so the clock advance is pure
+    // timer work.
+    function muzzlePollLoop(checker: FastChecker): void {
+      vi.spyOn(checker as unknown as { pollCycle: () => Promise<void> }, 'pollCycle')
+        .mockResolvedValue(undefined);
+      vi.spyOn(checker as unknown as { checkUrgentSignal: () => void }, 'checkUrgentSignal')
+        .mockImplementation(() => {});
+    }
+
     it('fires exec after bootstrap at 50-min interval', async () => {
       const { execFile } = await import('child_process');
       const agent = createMockAgent('my-agent');
       const checker = new FastChecker(agent, paths, '/tmp/framework');
+      muzzlePollLoop(checker);
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       expect(execFile).toHaveBeenCalledWith(
@@ -810,6 +824,7 @@ describe('FastChecker', () => {
       const execMock = execFile as ReturnType<typeof vi.fn>;
       const agent = createMockAgent('my-agent');
       const checker = new FastChecker(agent, paths, '/tmp/framework');
+      muzzlePollLoop(checker);
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       const callsBefore = execMock.mock.calls.length;
@@ -825,6 +840,7 @@ describe('FastChecker', () => {
       const agent = createMockAgent('my-agent');
       agent.isBootstrapped.mockReturnValue(false);
       const checker = new FastChecker(agent, paths, '/tmp/framework');
+      muzzlePollLoop(checker);
       checker.start();
       await vi.advanceTimersByTimeAsync(20 * 1000);
       expect(execFile).not.toHaveBeenCalledWith(
