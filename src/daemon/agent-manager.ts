@@ -12,6 +12,8 @@ import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
 import { surfaceWorkerExit } from './worker-exit-surface.js';
+import { resolveWorkerModel } from './worker-model-rotation.js';
+import { logEvent } from '../bus/event.js';
 import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -1249,8 +1251,23 @@ export class AgentManager {
 
   /**
    * Spawn an ephemeral worker session for a parallelized task.
+   *
+   * Model: an explicit `model` always wins. With no model the spawn enters the
+   * phase-1 Sonnet rotation (worker-model-rotation.ts) — Sonnet by default,
+   * every 4th default spawn on Fable 5 as the concurrent control cohort
+   * (exp_1781129540_te3sj). Every spawn logs a `worker_spawned` event carrying
+   * model/cohort/task_class; a respawn declared via `redoOf` also logs
+   * `worker_redo` on the parent's behalf — these events are the experiment's
+   * measurement plane, do not remove them.
    */
-  async spawnWorker(name: string, dir: string, prompt: string, parent?: string, model?: string): Promise<void> {
+  async spawnWorker(
+    name: string,
+    dir: string,
+    prompt: string,
+    parent?: string,
+    model?: string,
+    instrumentation?: { taskClass?: string; redoOf?: string; redoReason?: string },
+  ): Promise<void> {
     if (this.workers.has(name)) {
       throw new Error(`Worker "${name}" is already running`);
     }
@@ -1271,7 +1288,36 @@ export class AgentManager {
       projectRoot: this.frameworkRoot,
     };
 
-    const config = model ? { model } : {};
+    const choice = resolveWorkerModel(this.ctxRoot, model);
+    const config = { model: choice.model };
+    const taskClass = instrumentation?.taskClass ?? 'unclassified';
+
+    // Instrumentation events (never let logging break the spawn).
+    try {
+      const wpaths = resolvePaths(name, this.instanceId, this.org);
+      logEvent(wpaths, name, this.org, 'action', 'worker_spawned', 'info', {
+        worker_name: name,
+        model: choice.model,
+        cohort: choice.cohort,
+        rotation_index: choice.rotationIndex,
+        task_class: taskClass,
+        parent: parent ?? null,
+        redo_of: instrumentation?.redoOf ?? null,
+      });
+      if (instrumentation?.redoOf) {
+        // Logged under the parent (the rejecting/respawning party) per the
+        // experiment design; falls back to the worker when parentless.
+        const owner = parent ?? name;
+        const ppaths = parent ? resolvePaths(parent, this.instanceId, this.org) : wpaths;
+        logEvent(ppaths, owner, this.org, 'action', 'worker_redo', 'info', {
+          worker_name: name,
+          redo_of: instrumentation.redoOf,
+          model: choice.model,
+          reason: instrumentation.redoReason ?? 'respawn',
+          task_class: taskClass,
+        });
+      }
+    } catch { /* instrumentation is best-effort */ }
 
     this.workers.set(name, worker);
 

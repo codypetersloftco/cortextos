@@ -663,7 +663,7 @@ export class IPCServer {
           break;
 
         case 'spawn-worker': {
-          const d = request.data as { name?: string; dir?: string; prompt?: string; parent?: string; model?: string } | undefined;
+          const d = request.data as { name?: string; dir?: string; prompt?: string; parent?: string; model?: string; taskClass?: string; redoOf?: string; redoReason?: string } | undefined;
           if (!d?.name || !d?.dir || !d?.prompt) {
             response = { success: false, error: 'spawn-worker requires: name, dir, prompt' };
           } else if (!WORKER_NAME_REGEX.test(d.name) || d.name.length > 64) {
@@ -683,7 +683,11 @@ export class IPCServer {
             if (!allowed) {
               response = { success: false, error: 'Invalid worker dir' };
             } else {
-              this.agentManager.spawnWorker(d.name, resolvedDir, d.prompt, d.parent, d.model)
+              this.agentManager.spawnWorker(d.name, resolvedDir, d.prompt, d.parent, d.model, {
+                taskClass: d.taskClass,
+                redoOf: d.redoOf,
+                redoReason: d.redoReason,
+              })
                 .catch(err => console.error(`[ipc] spawn-worker failed:`, err));
               response = { success: true, data: `Spawning worker ${d.name}` };
             }
