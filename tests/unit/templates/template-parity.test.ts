@@ -105,6 +105,52 @@ describe('template parity: HEARTBEAT.md carries backlog-drain + global check', (
   }
 });
 
+// Absence-of-old-pattern guard (Prism red-team DIVERGE on dbda59d): presence
+// markers alone are gameable — they pass while the OLD rule persists right
+// next to the new one, and stale text carries equal authority to a bootstrap
+// reader (the same equal-authority disease as stale memory files). So beyond
+// requiring the new language, assert the old threshold phrasings are GONE
+// from EVERY markdown surface in the template trees: CLAUDE.md, AGENTS.md,
+// SOUL.md, guardrails-reference, soul-philosophy — all of it. Recursive walk:
+// a future template or community copy that reintroduces any variant fails
+// here with the offending file named.
+const OLD_THRESHOLD_PATTERNS: Record<string, RegExp> = {
+  'old TARGET form "significant piece of work (>10 minutes)"': /significant piece of work \(>10 minutes\)/,
+  'old SOUL form "(>10 min) gets a task BEFORE you start"': /\(>10 min\) gets a task BEFORE you start/,
+  'old guardrails-reference form "more than 10 minutes"': /more than 10 minutes/,
+};
+
+function walkMarkdownFiles(dir: string, out: string[] = []): string[] {
+  if (!existsSync(dir)) return out;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) walkMarkdownFiles(p, out);
+    else if (entry.name.endsWith('.md')) out.push(p);
+  }
+  return out;
+}
+
+describe('template parity: old task-threshold phrasings are fully purged', () => {
+  const mdFiles = [
+    ...walkMarkdownFiles(join(repoRoot, 'templates')),
+    ...walkMarkdownFiles(join(repoRoot, 'community')),
+  ];
+
+  it('discovers the markdown surfaces', () => {
+    expect(mdFiles.length).toBeGreaterThanOrEqual(50);
+  });
+
+  for (const [label, pattern] of Object.entries(OLD_THRESHOLD_PATTERNS)) {
+    it(`no surface still carries ${label}`, () => {
+      const offenders = mdFiles
+        .filter((f) => pattern.test(readFileSync(f, 'utf-8')))
+        .map((f) => f.slice(repoRoot.length + 1).replace(/\\/g, '/'));
+      expect(offenders).toEqual([]);
+    });
+  }
+});
+
 describe('template parity: tasks SKILL.md leads with the canonical threshold', () => {
   const files = findTasksSkillFiles();
 

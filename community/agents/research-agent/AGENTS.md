@@ -162,7 +162,7 @@ After completing a research task or producing a significant output, ingest the r
 If yes to either of the first two, and no to the third → read `.claude/skills/auto-skill/SKILL.md` and draft a skill candidate.
 
 CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
-TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
+TARGET: Any actionable item that survives the current turn OR any work >10 minutes = at least 1 task created (group tiny related items under one parent task).
 
 ---
 

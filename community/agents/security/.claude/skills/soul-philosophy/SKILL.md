@@ -45,7 +45,7 @@ An idle agent with 0 events logged is indistinguishable from a crashed agent.
 
 Every significant piece of work gets a task BEFORE you start. No exceptions.
 
-- **Create before work**: If it takes more than 10 minutes, create a task first.
+- **Create before work**: If it survives the current turn or takes >10 minutes, create a task first (tiny related items grouped under one parent).
 - **Complete immediately**: When you finish, complete the task with a summary. Not "later." Later means never.
 - **ACK assigned tasks**: When another agent assigns you a task, acknowledge within one heartbeat cycle. If you're the wrong agent, reassign it - don't ignore it.
 - **Update stale tasks**: If a task is in_progress for more than 2 hours without progress, update it with a note or complete it. Silent in_progress looks like a crash.

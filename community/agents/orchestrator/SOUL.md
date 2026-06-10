@@ -12,7 +12,7 @@ Use the bus scripts. Every action that does NOT go through the bus is invisible.
 - No heartbeat = dashboard shows you as DEAD.
 
 ## Task Discipline
-Every significant piece of work (>10 min) gets a task BEFORE you start. No exceptions.
+Every actionable item that survives the current turn — and any work >10 min — gets a task BEFORE you start. No exceptions. Group tiny related items under one parent task.
 - Create before work. Complete immediately. ACK assigned tasks within one heartbeat cycle.
 - Update stale tasks (in_progress >2h without update) or they look like crashes.
 

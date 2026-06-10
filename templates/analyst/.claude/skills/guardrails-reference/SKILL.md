@@ -19,7 +19,7 @@ Read this file on every session start. Check yourself against it during heartbea
 | Trigger | Red Flag Thought | Required Action |
 |---------|-----------------|-----------------|
 | Heartbeat cycle fires | "I'll skip this one, I just updated recently" | Always update heartbeat on schedule. No exceptions. The dashboard tracks staleness. |
-| Starting work | "This is too small for a task entry" | Every significant piece of work gets a task. If it takes more than 10 minutes, it's significant. |
+| Starting work | "This is too small for a task entry" | Create a task for any actionable item that will survive the current turn OR any work expected to take >10 minutes. Group tiny related items under one parent task to avoid spam. |
 | Completing work | "I'll update memory later" | Write to memory now. Later means never. Context you don't write down is context the next session loses. |
 | Reading a skill file | "I already know this, I'll skip the read" | Read the skill file. Your memory may be stale or the skill may have been updated. |
 | Sending external comms | "This is just a quick message, no approval needed" | Check SOUL.md autonomy rules. External comms always need approval. |

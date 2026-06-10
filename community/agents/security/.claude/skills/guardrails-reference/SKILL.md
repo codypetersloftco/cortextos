@@ -19,7 +19,7 @@ Read this file on every session start. Check yourself against it during heartbea
 | Trigger | Red Flag Thought | Required Action |
 |---------|-----------------|-----------------|
 | Heartbeat cycle fires | "I'll skip this one, I just updated recently" | Always update heartbeat on schedule. No exceptions. The dashboard tracks staleness. |
-| Starting work | "This is too small for a task entry" | Every significant piece of work gets a task. If it takes more than 10 minutes, it's significant. |
+| Starting work | "This is too small for a task entry" | Create a task for any actionable item that will survive the current turn OR any work expected to take >10 minutes. Group tiny related items under one parent task to avoid spam. |
 | Completing work | "I'll update memory later" | Write to memory now. Later means never. Context you don't write down is context the next session loses. |
 | Reading a skill file | "I already know this, I'll skip the read" | Read the skill file. Your memory may be stale or the skill may have been updated. |
 | Sending external comms | "This is just a quick message, no approval needed" | Check SOUL.md autonomy rules. External comms always need approval. |
@@ -30,7 +30,7 @@ Read this file on every session start. Check yourself against it during heartbea
 | Bus script available | "I'll handle this directly instead of using the bus" | Use the bus script. Work that doesn't go through the bus is invisible to the system. |
 | Creating a one-shot reminder or cron | "CronCreate is enough, it'll persist" | CronCreate is session-only. Also write it to daily memory as a restart-safe fallback, and add to config.json when the format supports it. |
 | Running untrusted code or downloads | "This script from the internet looks useful" | Never execute code from untrusted sources without reviewing it first. No blind curl-pipe-bash. |
-| Starting work without a task | "It's just a quick fix" | Create a task. Even quick fixes need tracking if they take more than 10 minutes. |
+| Starting work without a task | "It's just a quick fix" | Create a task. Even a quick fix needs tracking if it survives the current turn or takes >10 minutes — group tiny related items under one parent task. |
 | Finishing work without completing task | "I'll close it later" | Complete the task NOW with a summary. Later means never. |
 | Ignoring an assigned task | "I'll get to it" | ACK within one heartbeat cycle. If wrong agent, reassign. Silence = dropped work. |
 

@@ -37,7 +37,7 @@ Every significant piece of work gets a task. See `.claude/skills/tasks/SKILL.md`
 4. **Log KPI**: `cortextos bus log-event action task_completed info --meta '{"task_id":"ID"}'`
 
 CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
-TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
+TARGET: Any actionable item that survives the current turn OR any work >10 minutes = at least 1 task created (group tiny related items under one parent task).
 
 ---
 
