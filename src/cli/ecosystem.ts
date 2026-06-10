@@ -213,15 +213,19 @@ module.exports = {
       // stable run, so this gives crash-loop headroom without exhausting on a
       // multi-week-uptime daemon's occasional transient restart.
       max_restarts: 50,
-      // OOM-hardening (Wave 1): graceful RSS recycle. Daemon steady-state is
-      // ~75MB, so 900M is ~12x headroom (no false-trip) yet recycles the
-      // process — releasing accumulated handles/leaks (e.g. node-pty ConPTY
-      // churn) — well before host commit-memory exhaustion. min_uptime marks a
-      // sub-30s exit as unstable; exp_backoff grows the delay between rapid
-      // restarts so a crash-loop can't hammer the host. NO hard
-      // --max-old-space-size cap on purpose (a hard cap FatalOOMs on hit = the
-      // very failure we are preventing; let the graceful RSS recycle win).
-      max_memory_restart: '900M',
+      // OOM-hardening (Wave 1), cap re-sized after the 2026-06-10 box crash:
+      // the daemon's REAL working set under load (~30 PTY agents/workers)
+      // crossed the old 900M cap, and on Windows pm2's tree-kill reaps only
+      // the root pid — the recycle orphaned children holding the IPC pipe,
+      // wedging every respawn in a leaking listen-retry loop until host commit
+      // exhausted (bugcheck 0x153). 4G sits far above the measured legit peak
+      // (997MB) so the recycle fires only on a true runaway leak, not normal
+      // load. Size this guard to the MEASURED footprint, never a guess.
+      // min_uptime marks a sub-30s exit as unstable; exp_backoff grows the
+      // delay between rapid restarts so a crash-loop can't hammer the host.
+      // NO hard --max-old-space-size cap on purpose (a hard cap FatalOOMs on
+      // hit = the very failure we are preventing; graceful RSS recycle wins).
+      max_memory_restart: '4G',
       min_uptime: '30s',
       exp_backoff_restart_delay: 10000,
       restart_delay: 5000,
