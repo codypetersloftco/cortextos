@@ -2,14 +2,14 @@
 """Headless Microsoft Graph mail-attachment downloader (app-only / client-credentials).
 
 PERMANENT FIX for the "can't download attachments while Cody is in Outlook" gap:
-fetches mail + attachment RAW BYTES via the Graph API using the existing AI Admin
-Entra app. Works from ANY session — no desktop Outlook, no COM, immune to Outlook
-being busy/open.
+fetches mail + attachment RAW BYTES via the Graph API using the dedicated
+**CortextOS Agents - Mail** Entra app (app-only). Works from ANY session — no desktop
+Outlook, no COM, immune to Outlook being busy/open.
 
-Auth: client-credentials (app-only). Reads ENTRA_CLIENT_ID / ENTRA_TENANT_ID /
-ENTRA_CLIENT_SECRET from the environment, falling back to the AI Admin backend
-`.env`. Requires the **Mail.Read (Application)** permission admin-consented on the
-app (already granted, per task_1780194123702).
+Auth: client-credentials (app-only). Reads GRAPH_MAIL_CLIENT_ID / GRAPH_MAIL_TENANT_ID /
+GRAPH_MAIL_CLIENT_SECRET from orgs/<org>/secrets.env (NOT the AI Admin ENTRA_* sign-in
+app). Requires the **Mail.Read (Application)** permission admin-consented on the
+dedicated app (provisioned + proven e2e 2026-06-08).
 
 Usage:
   # 1. prove the runtime works end-to-end (token + Mail.Read on a mailbox):
