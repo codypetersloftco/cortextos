@@ -116,3 +116,23 @@ describe('AgentPTY — ephemeral-worker headless gate', () => {
     expect(args[args.length - 1]).toBe('resume the task');
   });
 });
+
+describe('AgentPTY — Windows executable-resolution env (PATHEXT)', () => {
+  // Root cause of the .exe document-classification / silent-no-op family:
+  // getBaseEnv() allowlist omitted PATHEXT, so child shells inherited NONE.
+  // PowerShell then builds its executable-extension list as
+  // <inherited PATHEXT> + ".CPL" — empty inheritance yields exactly ".CPL",
+  // making every .exe a "document" (pipelines throw, bare & silently no-ops).
+  it('spawn env carries a PATHEXT that includes .EXE on win32', async () => {
+    if (process.platform !== 'win32') return; // Windows-shaped assertion
+    vi.useFakeTimers();
+    const { fn, calls } = fakeSpawnCapture();
+    const pty = new AgentPTY(env as never, {}, undefined, undefined, false);
+    (pty as unknown as { spawnFn: unknown }).spawnFn = fn;
+    await pty.spawn('fresh', 'do the task');
+    const pathext = calls[0].opts.env?.PATHEXT;
+    expect(pathext).toBeDefined();
+    expect(pathext!.toUpperCase()).toContain('.EXE');
+    expect(pathext!.toUpperCase()).toContain('.CMD');
+  });
+});
