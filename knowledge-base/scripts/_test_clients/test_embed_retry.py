@@ -169,6 +169,32 @@ def test_rpm_throttle_disabled():
            f"sleeps={len(sleeps)} ledger={len(mmrag._embed_call_times)}")
 
 
+
+def test_query_quota_guard():
+    """embed_query_with_quota_guard: PerDay -> None + message; others raise/pass."""
+    print("\n[test 7/7] query quota guard: PerDay->None, 403->raise, 200->embedding")
+    _fresh()
+    cfg = {}
+    # PerDay drained -> None, no raise
+    c1 = fault_injection.FaultInjectionClient([(429, PER_DAY_MSG)])
+    r1 = mmrag.embed_query_with_quota_guard(c1, cfg, "q")
+    _check("PerDay returns None", r1 is None)
+    # Non-transient propagates
+    _fresh()
+    c2 = fault_injection.FaultInjectionClient([(403, "denied")])
+    raised = None
+    try:
+        mmrag.embed_query_with_quota_guard(c2, cfg, "q")
+    except APIError as e:
+        raised = e
+    _check("403 still raises", raised is not None and raised.code == 403)
+    # Healthy path returns the embedding values
+    _fresh()
+    c3 = fault_injection.FaultInjectionClient([(200, "")])
+    r3 = mmrag.embed_query_with_quota_guard(c3, cfg, "q")
+    _check("200 returns embedding values", r3 == [0.0] * 8)
+
+
 def main():
     test_per_minute_retry_honors_retry_delay()
     test_per_day_fails_fast()
@@ -176,6 +202,7 @@ def main():
     test_transient_exhausted()
     test_rpm_throttle_window()
     test_rpm_throttle_disabled()
+    test_query_quota_guard()
     print(f"\n{'ALL PASS' if not FAILURES else f'{len(FAILURES)} FAILURES: {FAILURES}'}")
     return 0 if not FAILURES else 1
 

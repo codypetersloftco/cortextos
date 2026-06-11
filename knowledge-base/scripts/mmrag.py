@@ -364,6 +364,24 @@ def embed_multimodal(client, config, description_text, media_bytes, mime_type):
     return embed_content(client, config, contents)
 
 
+def embed_query_with_quota_guard(client, config, query_text):
+    """embed_query that degrades a drained DAILY quota to a clean message.
+
+    Returns the embedding, or None when the PerDay quota is exhausted (the
+    one transient class retries can never fix same-day). Every other error
+    propagates unchanged. Factored out of cmd_query so the seam is testable
+    with the fault-injection client (no ChromaDB needed).
+    """
+    from google.genai import errors as _genai_errors
+    try:
+        return embed_query(client, config, query_text)
+    except _genai_errors.APIError as e:
+        if _is_daily_quota_error(e):
+            print("Daily embed quota exhausted (PerDay) — query embedding unavailable; resets midnight PT.")
+            return None
+        raise
+
+
 def embed_query(client, config, query_text):
     """Embed a query string for retrieval."""
     return embed_content(client, config, query_text, task_type="RETRIEVAL_QUERY")
@@ -1258,7 +1276,14 @@ def cmd_query(args):
     show_full = args.full
     type_filter = args.type  # e.g., "image", "video", "text", "pdf"
 
-    query_embedding = embed_query(client, config, args.question)
+    # PerDay quota fail-fast on the QUERY path too (bf5ffcd covered ingest):
+    # without this, a drained daily quota surfaces as a raw 429 traceback.
+    # Degrade gracefully — a clean message and an empty result; the TS
+    # wrapper (src/bus/knowledge-base.ts) then returns 0 results instead of
+    # dumping a stack trace.
+    query_embedding = embed_query_with_quota_guard(client, config, args.question)
+    if query_embedding is None:
+        return
 
     # Build ChromaDB where filter for type
     where_filter = None
