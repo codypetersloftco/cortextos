@@ -885,6 +885,50 @@ export class IPCServer {
 }
 
 /**
+ * Typed daemon health states. Distinguishes the decisive failures (no pipe,
+ * permission denied) from the transient ones (timeout, refused) so callers can
+ * retry only what retrying can fix and report honestly on the rest.
+ */
+export type DaemonHealthState =
+  | 'running' // probe answered successfully
+  | 'no_pipe' // ENOENT: no IPC pipe exists — daemon is genuinely not running
+  | 'refused' // ECONNREFUSED/EBUSY/EAGAIN: pipe busy or mid-boot — transient
+  | 'timeout' // no reply within the window — transient
+  | 'permission_denied' // EPERM/EACCES: pipe exists but this session may not access it (e.g. Session-0 service)
+  | 'error'; // anything else — decisive, do not retry
+
+export interface DaemonHealth {
+  state: DaemonHealthState;
+  code?: string;
+  message?: string;
+  attempts: number;
+  pipePath: string;
+}
+
+export function classifyIpcError(code: string | undefined): DaemonHealthState {
+  switch (code) {
+    case 'ENOENT':
+      return 'no_pipe';
+    case 'ECONNREFUSED':
+    case 'EBUSY':
+    case 'EAGAIN':
+      return 'refused';
+    case 'ETIMEDOUT':
+      return 'timeout';
+    case 'EPERM':
+    case 'EACCES':
+      return 'permission_denied';
+    default:
+      return 'error';
+  }
+}
+
+/** Only timeout and refused are worth retrying — a missing pipe or denied access will not change in 1s. */
+export function isTransientHealthState(state: DaemonHealthState): boolean {
+  return state === 'timeout' || state === 'refused';
+}
+
+/**
  * IPC client for sending commands to the daemon.
  * Used by CLI commands.
  */
@@ -940,6 +984,9 @@ export class IPCClient {
 
   /**
    * Check if the daemon is running.
+   *
+   * Single probe, no retry — callers that poll (start.ts) provide their own
+   * loop. For a retrying, typed probe use probeDaemon() instead.
    */
   async isDaemonRunning(): Promise<boolean> {
     try {
@@ -948,5 +995,83 @@ export class IPCClient {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * One connection attempt, classified. Never rejects.
+   */
+  private probeOnce(timeoutMs = 5000): Promise<{ state: DaemonHealthState; code?: string; message?: string }> {
+    const { createConnection } = require('net');
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (r: { state: DaemonHealthState; code?: string; message?: string }) => {
+        if (!settled) {
+          settled = true;
+          resolve(r);
+        }
+      };
+
+      const socket = createConnection(this.socketPath, () => {
+        socket.write(JSON.stringify({ type: 'status', source: 'health-probe' }));
+      });
+
+      let data = '';
+      socket.on('data', (chunk: Buffer) => {
+        data += chunk.toString();
+      });
+
+      socket.on('end', () => {
+        try {
+          const resp = JSON.parse(data);
+          done(resp.success ? { state: 'running' } : { state: 'error', message: resp.error });
+        } catch {
+          done({ state: 'error', message: 'invalid response from daemon' });
+        }
+      });
+
+      socket.on('error', (err: Error) => {
+        const code = (err as NodeJS.ErrnoException).code;
+        done({ state: classifyIpcError(code), code, message: err.message });
+        socket.destroy();
+      });
+
+      socket.setTimeout(timeoutMs, () => {
+        socket.destroy();
+        done({ state: 'timeout' });
+      });
+    });
+  }
+
+  /**
+   * Typed daemon health probe with retry/backoff on transient states only.
+   *
+   * Decisive states (running, no_pipe, permission_denied, error) return
+   * immediately — retrying a missing pipe just delays an honest answer.
+   * Transient states (timeout, refused) retry up to `retries` more times.
+   */
+  async probeDaemon(opts: {
+    retries?: number;
+    backoffMs?: number[];
+    timeoutMs?: number;
+    onAttempt?: (attempt: number, state: DaemonHealthState) => void;
+  } = {}): Promise<DaemonHealth> {
+    const retries = opts.retries ?? 2;
+    const backoff = opts.backoffMs ?? [300, 900];
+    let last: { state: DaemonHealthState; code?: string; message?: string } = { state: 'error' };
+    let attempts = 0;
+
+    for (let i = 0; i <= retries; i++) {
+      attempts++;
+      last = await this.probeOnce(opts.timeoutMs);
+      opts.onAttempt?.(attempts, last.state);
+      if (!isTransientHealthState(last.state)) break;
+      if (i < retries) {
+        const delay = backoff[Math.min(i, backoff.length - 1)] ?? 300;
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    return { ...last, attempts, pipePath: this.socketPath };
   }
 }

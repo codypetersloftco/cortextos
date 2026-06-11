@@ -18,15 +18,24 @@ module.exports = {
         CTX_PROJECT_ROOT: "C:\\Users\\cody\\cortextos",
         CTX_ORG: process.env.CTX_ORG || "loftco-autopilot",
       },
-      // BUG-016: max_restarts stays 50 (NOT 10); min_uptime resets the count
-      // after a stable run so a multi-week daemon's transient restarts don't
-      // exhaust it.
+      // BUG-016: max_restarts stays 50 (NOT reverted to 10). PM2 counts these
+      // toward unstable restarts; min_uptime below resets the count after a
+      // stable run, so this gives crash-loop headroom without exhausting on a
+      // multi-week-uptime daemon's occasional transient restart.
       max_restarts: 50,
-      // OOM-hardening (Wave 1): graceful RSS recycle (~12x headroom over the
-      // daemon's ~75MB steady-state) before host commit-memory exhaustion;
-      // min_uptime + exp_backoff bound crash-loop churn. NO hard heap cap by
-      // design (a hard cap FatalOOMs on hit = the failure we are preventing).
-      max_memory_restart: '900M',
+      // OOM-hardening (Wave 1), cap re-sized after the 2026-06-10 box crash:
+      // the daemon's REAL working set under load (~30 PTY agents/workers)
+      // crossed the old 900M cap, and on Windows pm2's tree-kill reaps only
+      // the root pid — the recycle orphaned children holding the IPC pipe,
+      // wedging every respawn in a leaking listen-retry loop until host commit
+      // exhausted (bugcheck 0x153). 4G sits far above the measured legit peak
+      // (997MB) so the recycle fires only on a true runaway leak, not normal
+      // load. Size this guard to the MEASURED footprint, never a guess.
+      // min_uptime marks a sub-30s exit as unstable; exp_backoff grows the
+      // delay between rapid restarts so a crash-loop can't hammer the host.
+      // NO hard --max-old-space-size cap on purpose (a hard cap FatalOOMs on
+      // hit = the very failure we are preventing; graceful RSS recycle wins).
+      max_memory_restart: '4G',
       min_uptime: '30s',
       exp_backoff_restart_delay: 10000,
       restart_delay: 5000,
@@ -35,7 +44,7 @@ module.exports = {
     {
       name: 'cortextos-dashboard',
       script: "C:\\Users\\cody\\cortextos\\dashboard\\node_modules\\next\\dist\\bin\\next",
-      args: "start",
+      args: "dev",
       cwd: "C:\\Users\\cody\\cortextos\\dashboard",
       env: {
         PORT: process.env.PORT || '3000',
@@ -44,8 +53,13 @@ module.exports = {
       // by /onboarding Phase 7. PM2 just supervises the dashboard process.
       windowsHide: true,
       max_restarts: 50,
-      // OOM-hardening (Wave 1): graceful RSS recycle (1400M = huge headroom
-      // over ~18MB steady-state). NO hard heap cap by design.
+      // OOM-hardening (Wave 1): graceful RSS-based recycle before host memory
+      // pressure builds. 1400M is huge headroom over the dashboard's ~18MB
+      // steady-state (next start), so it never false-trips; it only fires if
+      // a leak climbs. min_uptime + exp_backoff bound rapid restart churn.
+      // NOTE: deliberately NO hard --max-old-space-size cap — a hard heap cap
+      // FatalOOM-crashes the process when hit, which is the failure mode we are
+      // preventing; max_memory_restart recycles gracefully instead.
       max_memory_restart: '1400M',
       min_uptime: '30s',
       exp_backoff_restart_delay: 10000,

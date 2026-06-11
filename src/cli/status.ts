@@ -3,17 +3,55 @@ import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
+import type { DaemonHealth } from '../daemon/ipc-server.js';
 import type { AgentStatus, Heartbeat } from '../types/index.js';
+
+/**
+ * Honest failure wording per health state. Only no_pipe may claim the daemon
+ * is not running — every other failure is "could not reach", because a CLI
+ * shell cannot discriminate a down daemon from an unreachable one (e.g. a
+ * Session-0 service whose pipe this session may not access).
+ */
+export function statusFailureMessage(health: DaemonHealth): string {
+  switch (health.state) {
+    case 'no_pipe':
+      return 'Daemon is not running (no IPC pipe). Showing last known heartbeats:\n';
+    case 'timeout':
+    case 'refused':
+      return (
+        `Could not reach the daemon after ${health.attempts} attempt(s) — it may be busy or starting.\n` +
+        'Showing last known heartbeats; re-run in a few seconds for live status.\n'
+      );
+    case 'permission_denied':
+      return (
+        'Daemon IPC pipe exists but access was denied — the daemon may be running as a service in another session.\n' +
+        'Showing last known heartbeats:\n'
+      );
+    default:
+      return (
+        `Could not reach the daemon (${health.code || health.message || 'unknown error'}).\n` +
+        'Showing last known heartbeats:\n'
+      );
+  }
+}
 
 export const statusCommand = new Command('status')
   .option('--instance <id>', 'Instance ID')
+  .option('--debug', 'Show IPC diagnostics (pipe path, probe attempts)')
   .description('Show agent health and status')
-  .action(async (options: { instance?: string }) => {
+  .action(async (options: { instance?: string; debug?: boolean }) => {
     const instanceId = options.instance || process.env.CTX_INSTANCE_ID || 'default';
     const ipc = new IPCClient(instanceId);
-    const daemonRunning = await ipc.isDaemonRunning();
+    const health = await ipc.probeDaemon({
+      onAttempt: options.debug
+        ? (attempt, state) => console.log(`  [debug] probe attempt ${attempt}: ${state}`)
+        : undefined,
+    });
+    if (options.debug) {
+      console.log(`  [debug] IPC pipe: ${health.pipePath}`);
+    }
 
-    if (daemonRunning) {
+    if (health.state === 'running') {
       // Get live status from daemon
       const response = await ipc.send({ type: 'status', source: 'cortextos status' });
       if (response.success) {
@@ -22,7 +60,7 @@ export const statusCommand = new Command('status')
       }
     } else {
       // Fall back to reading heartbeat files
-      console.log('Daemon is not running. Showing last known heartbeats:\n');
+      console.log(statusFailureMessage(health));
       const ctxRoot = join(homedir(), '.cortextos', instanceId);
       const stateDir = join(ctxRoot, 'state');
 
