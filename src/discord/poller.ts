@@ -7,6 +7,25 @@ import { ensureDir } from '../utils/atomic.js';
 export type DiscordMessageHandler = (msg: DiscordMessage) => void;
 
 /**
+ * Degraded-state event emitted by the failure watchdog (prism red-team item 5).
+ *   - 'auth':      HTTP 401/403 — will NOT self-heal (revoked token, perms
+ *                  change). Emitted on the FIRST occurrence.
+ *   - 'transient': timeout/429/5xx/network — emitted after
+ *                  TRANSIENT_ALERT_THRESHOLD consecutive failures.
+ *   - 'recovered': first successful poll after any degraded event fired.
+ * Re-alerts are debounced (REALERT_DEBOUNCE_MS). The poller stays
+ * transport-agnostic: it only invokes the callback — the caller
+ * (agent-manager) owns how the alert is surfaced.
+ */
+export interface DiscordPollerDegradedEvent {
+  kind: 'auth' | 'transient' | 'recovered';
+  status?: number;
+  consecutiveErrors: number;
+  message: string;
+}
+export type DiscordDegradedHandler = (ev: DiscordPollerDegradedEvent) => void;
+
+/**
  * Discord inbound polling loop. The REST-poll analogue of TelegramPoller:
  * polls GET /channels/{id}/messages?after=<cursor> on an interval and routes
  * new messages to registered handlers.
@@ -35,6 +54,22 @@ export class DiscordPoller {
   private pollInterval: number;
   private consecutivePollErrors: number = 0;
   private log: (msg: string) => void;
+  // ---- failure watchdog state ----
+  private degradedHandler: DiscordDegradedHandler | null = null;
+  private lastDegradedAlertAt: number = 0;
+  /** True once a degraded event fired and no success has happened since. */
+  private degradedAlertFired: boolean = false;
+  private lastSuccessAt: number = 0;
+  private lastErrorAt: number = 0;
+  private lastErrorStatus: number | null = null;
+  private lastHealthWriteAt: number = 0;
+  /** Transient failures alert only after this many CONSECUTIVE errors
+   *  (~minutes of real outage at capped backoff). Auth (401/403) alerts on
+   *  the first — it will not self-heal. */
+  private static readonly TRANSIENT_ALERT_THRESHOLD = 10;
+  private static readonly REALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+  /** Steady-state health-file refresh cadence (avoid a write per 2s poll). */
+  private static readonly HEALTH_WRITE_INTERVAL_MS = 60 * 1000;
   /**
    * True once the cursor is anchored — either loaded from a persisted
    * `.discord-offset` OR seeded on first run. Until then, the first poll
@@ -72,13 +107,17 @@ export class DiscordPoller {
     this.messageHandlers.push(handler);
   }
 
+  onDegraded(handler: DiscordDegradedHandler): void {
+    this.degradedHandler = handler;
+  }
+
   async start(): Promise<void> {
     this.running = true;
     this.lastExitReason = '';
     while (this.running) {
       try {
         await this.pollOnce();
-        this.consecutivePollErrors = 0;
+        this.handlePollSuccess();
       } catch (err) {
         // Transient (rate-limit, network, 5xx) — log and keep polling. The
         // offset only advanced for messages whose handlers succeeded, so
@@ -90,8 +129,14 @@ export class DiscordPoller {
         // poller-timeout spam). Back off exponentially on consecutive errors
         // (capped at 60s) and reset to the normal cadence on the first
         // success, so a healthy channel is unaffected.
+        //
+        // Failure watchdog (prism red-team item 5): backoff alone retries a
+        // revoked token / dead perms FOREVER silently. Classify and emit a
+        // degraded event so the wiring layer can alert — polling continues
+        // at max backoff either way, so a server-side fix self-recovers.
         this.consecutivePollErrors++;
         console.error('[discord-poller] Poll error:', err instanceof Error ? err.message : err);
+        this.handlePollError(err);
         const backoff = Math.min(
           60000,
           this.pollInterval * Math.pow(2, Math.min(this.consecutivePollErrors, 5)),
@@ -100,6 +145,77 @@ export class DiscordPoller {
         continue;
       }
       await sleep(this.pollInterval);
+    }
+  }
+
+  /** Success bookkeeping: recovery notice (only if a degraded event fired),
+   *  counter reset, throttled health refresh. */
+  private handlePollSuccess(): void {
+    const wasErrored = this.consecutivePollErrors > 0;
+    this.consecutivePollErrors = 0;
+    this.lastSuccessAt = Date.now();
+    if (this.degradedAlertFired) {
+      this.degradedAlertFired = false;
+      this.lastDegradedAlertAt = 0;
+      this.degradedHandler?.({
+        kind: 'recovered',
+        consecutiveErrors: 0,
+        message: 'poll succeeded after degraded state',
+      });
+    }
+    if (wasErrored || Date.now() - this.lastHealthWriteAt > DiscordPoller.HEALTH_WRITE_INTERVAL_MS) {
+      this.writeHealth();
+    }
+  }
+
+  /** Error classification + degraded-event emission (debounced). */
+  private handlePollError(err: unknown): void {
+    const status = typeof (err as { status?: unknown })?.status === 'number'
+      ? (err as { status: number }).status
+      : undefined;
+    const isAuth = status === 401 || status === 403;
+    this.lastErrorAt = Date.now();
+    this.lastErrorStatus = status ?? null;
+
+    if (
+      this.degradedHandler &&
+      (isAuth || this.consecutivePollErrors >= DiscordPoller.TRANSIENT_ALERT_THRESHOLD)
+    ) {
+      const now = Date.now();
+      if (now - this.lastDegradedAlertAt > DiscordPoller.REALERT_DEBOUNCE_MS) {
+        this.lastDegradedAlertAt = now;
+        this.degradedAlertFired = true;
+        this.degradedHandler({
+          kind: isAuth ? 'auth' : 'transient',
+          status,
+          consecutiveErrors: this.consecutivePollErrors,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    this.writeHealth();
+  }
+
+  /**
+   * Persist `.discord-poller-health` next to `.discord-offset` so the analyst
+   * canary can assert poller health without log parsing. Written on every
+   * error cycle (backoff-gated) and at most once per minute when healthy.
+   */
+  private writeHealth(): void {
+    try {
+      ensureDir(this.stateDir);
+      const health = {
+        consecutive_poll_errors: this.consecutivePollErrors,
+        last_success_at: this.lastSuccessAt ? new Date(this.lastSuccessAt).toISOString() : null,
+        last_error_at: this.lastErrorAt ? new Date(this.lastErrorAt).toISOString() : null,
+        last_error_status: this.lastErrorStatus,
+        degraded_alert_fired: this.degradedAlertFired,
+        updated_at: new Date().toISOString(),
+      };
+      writeFileSync(join(this.stateDir, '.discord-poller-health'), JSON.stringify(health), 'utf-8');
+      this.lastHealthWriteAt = Date.now();
+    } catch {
+      // Health is observability only — never break the poll loop on it.
     }
   }
 

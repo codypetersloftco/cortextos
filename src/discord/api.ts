@@ -71,7 +71,14 @@ export class DiscordAPI {
       if (!response.ok) {
         const body = await response.text().catch(() => '');
         // Redact: never echo the token; body is Discord's error JSON (safe).
-        throw new Error(`Discord API error ${response.status}: ${body.slice(0, 200)}`);
+        // Carry the HTTP status as a structured property so consumers (the
+        // poller failure watchdog) can discriminate 401/403 from transient
+        // errors without regex-parsing the message.
+        const error = new Error(
+          `Discord API error ${response.status}: ${body.slice(0, 200)}`,
+        ) as Error & { status?: number };
+        error.status = response.status;
+        throw error;
       }
       return await response.json();
     } catch (err) {
