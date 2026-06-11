@@ -62,3 +62,13 @@ boilerplate at runtime.
 
 The leading underscore marks the package as test-internal — it's not part of
 the user-facing CLI surface and doesn't ship in the runtime hot path.
+
+## Embed retry + RPM throttle: `test_embed_retry.py`
+
+`_StubModels.embed_content` is scripted the same way as `generate_content`
+(one script entry per call, code 200 returns a stub
+`result.embeddings[0].values` shape). `test_embed_retry.py` behaviorally
+verifies `mmrag._embed_with_retry` (per-minute 429 honoring the server
+`retryDelay`, PerDay fail-fast, structural non-transient predicate,
+exhaustion) and `mmrag._throttle_embed_rpm` (rolling 60s window, prune,
+disable via limit 0). Run: `python -m _test_clients.test_embed_retry`.

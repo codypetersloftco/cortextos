@@ -66,6 +66,15 @@ FLASH_OUTPUT_PRICE_PER_M = 0.60
 TRANSIENT_HTTP_CODES = {429, 500, 503}
 TRANSIENT_STATUS_NAMES = {"UNAVAILABLE", "RESOURCE_EXHAUSTED"}
 
+# Gemini FREE tier enforces BOTH 1000 embeds/day AND 100 embeds/min. The
+# ingest loop fires one embed per chunk back-to-back, so any file chunking
+# into ~100+ requests (a mature MEMORY.md, a busy daily memory file) blows
+# EmbedContentRequestsPerMinute ON ITS OWN and the whole file fails — proven
+# 2026-06-11 (4 failures across 20 min incl. isolated post-cooldown runs;
+# a per-minute burst cannot succeed without pacing). Throttle client-side
+# under the cap; 0 disables (paid tiers).
+EMBED_RPM_LIMIT = int(os.environ.get("KB_EMBED_RPM_LIMIT", "90"))
+
 USAGE_FILE = MMRAG_DIR / "usage.json"
 
 # ---------------------------------------------------------------------------
@@ -247,13 +256,92 @@ def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
     raise last_err if last_err else RuntimeError("retry loop completed without response or error")
 
 
+# Rolling-window call ledger for the RPM throttle (monotonic timestamps of
+# the last EMBED_RPM_LIMIT embed attempts). Module-level: one ingest process
+# = one quota consumer. Tests reset it between scenarios.
+_embed_call_times = []
+
+
+def _throttle_embed_rpm(limit=None, now_fn=time.monotonic, sleep_fn=time.sleep):
+    """Block until one more embed call fits under `limit` per rolling 60s.
+
+    limit defaults to EMBED_RPM_LIMIT; <= 0 disables. now_fn/sleep_fn are
+    injectable so tests can drive the window without real time.
+    """
+    cap = EMBED_RPM_LIMIT if limit is None else limit
+    if cap <= 0:
+        return
+    while True:
+        now = now_fn()
+        while _embed_call_times and now - _embed_call_times[0] >= 60.0:
+            _embed_call_times.pop(0)
+        if len(_embed_call_times) < cap:
+            break
+        wait = max(60.0 - (now - _embed_call_times[0]) + 0.05, 0.05)
+        print(f"    RPM throttle: {len(_embed_call_times)} embeds in the last 60s — sleeping {wait:.1f}s to stay under the free-tier per-minute cap")
+        sleep_fn(wait)
+    _embed_call_times.append(now_fn())
+
+
+def _parse_retry_delay_seconds(err):
+    """Extract the server-suggested retryDelay (e.g. \"'retryDelay': '21s'\")
+    from a Gemini APIError. Returns None when absent/unparseable."""
+    try:
+        import re as _re
+        text = f"{getattr(err, 'message', '') or ''} {err}"
+        m = _re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s", text)
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _is_daily_quota_error(err):
+    """429 PerDay = daily quota: no same-day retry can succeed (resets
+    midnight PT). Distinct from the per-minute cap, which pacing fixes."""
+    return getattr(err, "code", None) == 429 and "PerDay" in f"{getattr(err, 'message', '') or ''} {err}"
+
+
+def _embed_with_retry(client, *, model, contents, embed_config, backoffs=(25, 35, 65), sleep_fn=time.sleep):
+    """client.models.embed_content with RPM throttling + bounded retries.
+
+    - Throttles under the free-tier per-minute cap BEFORE every attempt.
+    - 429 PerDay fails fast (re-raised) — retries cannot succeed today.
+    - Other transient errors (429 per-minute, 500, 503) honor the server's
+      retryDelay when present, else the positional backoff.
+    - Non-transient APIErrors raise immediately (structural .code/.status
+      predicate, same as _retry_generate_content).
+    """
+    from google.genai import errors as _genai_errors
+    last_err = None
+    for attempt, backoff in enumerate(backoffs, start=1):
+        _throttle_embed_rpm(sleep_fn=sleep_fn)
+        try:
+            return client.models.embed_content(model=model, contents=contents, config=embed_config)
+        except _genai_errors.APIError as e:
+            last_err = e
+            if _is_daily_quota_error(e):
+                print("    Daily embed quota exhausted (PerDay) — failing fast; resets midnight PT")
+                raise
+            is_transient = (e.code in TRANSIENT_HTTP_CODES) or (e.status in TRANSIENT_STATUS_NAMES)
+            if not is_transient:
+                raise
+            if attempt < len(backoffs):
+                delay = _parse_retry_delay_seconds(e) or backoff
+                print(f"    Transient embed error (HTTP {e.code} {e.status or ''}); retrying in {delay:.0f}s (attempt {attempt}/{len(backoffs)})")
+                sleep_fn(delay)
+            else:
+                print(f"    Exhausted embed retries on transient error: HTTP {e.code} {e.status or ''}")
+    raise last_err if last_err else RuntimeError("embed retry loop completed without response or error")
+
+
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
     """Embed content using Gemini Embedding 2. Content can be text string or list of Parts."""
     from google.genai import types
-    result = client.models.embed_content(
+    result = _embed_with_retry(
+        client,
         model=config.get("embedding_model", "gemini-embedding-2-preview"),
         contents=content,
-        config=types.EmbedContentConfig(
+        embed_config=types.EmbedContentConfig(
             output_dimensionality=config.get("embedding_dimensions", DEFAULT_EMBEDDING_DIMENSIONS),
             task_type=task_type,
         ),
