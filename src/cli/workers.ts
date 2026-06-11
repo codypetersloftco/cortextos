@@ -9,15 +9,21 @@ export const spawnWorkerCommand = new Command('spawn-worker')
   .requiredOption('--dir <path>', 'Working directory for the worker session')
   .requiredOption('--prompt <text>', 'Task prompt to inject at session start')
   .option('--parent <agent>', 'Parent agent name (for bus reply routing)')
-  .option('--model <model>', 'Claude model to use (defaults to org default)')
-  .action(async (name: string, opts: { dir: string; prompt: string; parent?: string; model?: string }) => {
+  .option('--model <model>', 'Claude model to use (default: Sonnet rotation — every 4th default spawn runs Fable 5 as the experiment control; an explicit model bypasses the rotation)')
+  .option('--task-class <class>', 'Task class for the worker-model experiment events (e.g. extraction, build, analysis)')
+  .option('--redo-of <worker>', 'Declare this spawn a REDO of a prior worker (logs a worker_redo event on the parent)')
+  .option('--redo-reason <text>', 'Why the prior worker output was rejected (used with --redo-of)')
+  .action(async (name: string, opts: { dir: string; prompt: string; parent?: string; model?: string; taskClass?: string; redoOf?: string; redoReason?: string }) => {
     const env = resolveEnv();
     const client = new IPCClient(env.instanceId);
     const dir = resolve(opts.dir);
 
     const response = await client.send({
       type: 'spawn-worker',
-      data: { name, dir, prompt: opts.prompt, parent: opts.parent, model: opts.model },
+      data: {
+        name, dir, prompt: opts.prompt, parent: opts.parent, model: opts.model,
+        taskClass: opts.taskClass, redoOf: opts.redoOf, redoReason: opts.redoReason,
+      },
     });
 
     if (response.success) {
