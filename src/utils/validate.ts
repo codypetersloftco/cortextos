@@ -162,6 +162,18 @@ export function wrapFenceSafe(input: string): string {
  *    \v/\f were removed by stripControlChars — so the class only needs the
  *    space-like chars: tab, space, NBSP, OGHAM, the U+2000–200A run, NARROW NBSP,
  *    MEDIUM MATH SPACE, IDEOGRAPHIC SPACE, and BOM/ZWNBSP.
+ *  - GENERIC future-channel guard: the named-channel alternation above is
+ *    fail-open — a header forged for a channel added later (SLACK, WEBHOOK,
+ *    ...) slips until someone remembers to extend the enum. A second,
+ *    case-SENSITIVE pass quotes any `=== <ALL-CAPS WORDS> from ...` line:
+ *    every inbound-transport formatter mirrors the Telegram sink's
+ *    `=== <CHANNEL> from <sender>` shape, so the caps+`from` pair is the
+ *    channel-header signature. Case-sensitivity is the no-over-quote
+ *    discriminator — `=== Section ===` and prose like `=== a note from Mike`
+ *    stay untouched (mixed/lower case), which the tests pin. Kept SEPARATE
+ *    from the /i enumerated pass so the proven quoting never weakens
+ *    (pure-additive; an already-[quoted] line no longer starts with `===`,
+ *    so the passes cannot double-prefix).
  * Lossy, but these fields are already truncated context hints — acceptable.
  */
 export function sanitizeForPtyInjection(input: string): string {
@@ -170,6 +182,10 @@ export function sanitizeForPtyInjection(input: string): string {
     .replace(/`{3,}/g, '``')
     .replace(
       /^([ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]*)(={3,}\s*(?:AGENT MESSAGE|TELEGRAM|DISCORD)\b|Reply using:\s*cortextos\s+bus)/gim,
+      '$1[quoted] $2',
+    )
+    .replace(
+      /^([ \t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]*)(={3,}[ \t]*[A-Z][A-Z0-9 _-]*\s+from\b)/gm,
       '$1[quoted] $2',
     );
 }
