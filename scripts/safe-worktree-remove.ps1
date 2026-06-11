@@ -28,9 +28,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Some agent/tool pwsh contexts ship a degraded PATHEXT (observed: ".CPL"),
+# which makes PowerShell classify EVERY .exe as a "document": pipelined
+# invocations throw "Cannot run a document in the middle of a pipeline" and
+# bare & invocations silently no-op (the 2026-06-11 diagnosis of the
+# .cmd-shim/document-classification failure family). Self-heal before any
+# external call.
+if ($env:PATHEXT -notmatch '\.EXE') {
+  $env:PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC'
+}
+
+# Agent/pwsh tool contexts may lack git on PATH — resolve it robustly.
+# (No PS7-only syntax: this must also run under Windows PowerShell 5.1.)
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+$git = if ($gitCmd) { $gitCmd.Source } else { $null }
+if (-not $git) {
+  foreach ($candidate in @("$env:ProgramFiles\Git\cmd\git.exe", "$env:ProgramFiles\Git\bin\git.exe", "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe")) {
+    if (Test-Path $candidate) { $git = $candidate; break }
+  }
+}
+if (-not $git) { throw "git not found on PATH or in standard install locations." }
+
 if (-not (Test-Path $WorktreePath)) {
   # Directory already gone — just clean the registry.
-  git -C $RepoRoot worktree prune
+  & $git -C $RepoRoot worktree prune
   Write-Output "OK: $WorktreePath absent; worktree registry pruned."
   exit 0
 }
@@ -41,7 +62,7 @@ if ($resolved -eq (Resolve-Path $RepoRoot).Path) {
 }
 
 # 1. Dirty check (tracked changes only; untracked scratch is fine to lose).
-$dirty = git -C $resolved status --porcelain | Where-Object { $_ -notmatch '^\?\?' }
+$dirty = & $git -C $resolved status --porcelain | Where-Object { $_ -notmatch '^\?\?' }
 if ($dirty -and -not $Force) {
   throw "Refusing: worktree has tracked changes (use -Force to override):`n$($dirty -join "`n")"
 }
@@ -54,8 +75,8 @@ foreach ($rp in $reparse) {
 }
 
 # 4. Now the worktree contains only real files — safe to remove.
-git -C $RepoRoot worktree remove $resolved --force
-git -C $RepoRoot worktree prune
+& $git -C $RepoRoot worktree remove $resolved --force
+& $git -C $RepoRoot worktree prune
 
 # 5. Verify the shared tree survived.
 $probe = Join-Path $RepoRoot 'node_modules\commander\package.json'
