@@ -507,3 +507,79 @@ Key paths:
 
 For agent lifecycle (spawn, restart, config), see `plugins/cortextos-agent-skills/skills/agent-management/SKILL.md`.
 For secrets and credentials, see `plugins/cortextos-agent-skills/skills/env-management/SKILL.md`.
+
+---
+
+## Soft Interrupt — Mid-Loop Steering
+
+During a **long-running turn** (multi-pass loops, batch jobs, extended autonomous
+work), new Telegram messages from Cody are **not delivered to you mid-turn** — the
+bus inbox and PTY turn-boundary injection surface them only at a turn boundary, so
+in the middle of a long loop you are blind to them until the turn ends. The daemon,
+however, writes every inbound Telegram message to your live feed the **instant** it
+arrives:
+
+```
+${CTX_ROOT}/logs/${CTX_AGENT_NAME}/inbound-messages.jsonl
+```
+
+Poll that feed **between passes** so Cody can steer or correct you mid-task without
+a restart. Helper (resolves your agent automatically from CTX_AGENT_NAME / CTX_ROOT):
+
+```
+python C:/Users/cody/cortextos/scripts/live_inbound_poll.py <flags>
+```
+
+**Scope — Telegram only.** This feed contains only Telegram messages. A mid-loop
+steer Cody sends through another channel (Discord, the dashboard) is *not* in it —
+those still arrive at a normal turn boundary. Do not assume the poll catches every
+channel; it catches live Telegram.
+
+### 1. Mandatory de-dup fence — START of every normal turn
+
+Before any loop or long tool sequence, run **once**:
+
+```
+python C:/Users/cody/cortextos/scripts/live_inbound_poll.py --sync-turn-start
+```
+
+This advances your cursor to the latest message. The message that *woke* this turn
+was already delivered to you through the normal turn boundary — the fence stops the
+mid-loop poller from replaying it and answering it **twice**. Skipping this is the
+one mistake that breaks the feature.
+
+### 2. Between every pass of a long loop
+
+A "pass" = one bounded stage/iteration. Poll between **passes**, NOT on every tool
+call (too costly).
+
+```
+python C:/Users/cody/cortextos/scripts/live_inbound_poll.py --poll
+```
+
+- `--poll` prints messages newer than your cursor and does **not** advance it.
+- If it returns messages: **act on them before the next pass** — apply the
+  correction, hold, wait, or stop as instructed, and reply to Cody. New steering
+  outranks your current plan; reconcile against it before continuing.
+- **After** you have handled them, commit the cursor:
+
+```
+python C:/Users/cody/cortextos/scripts/live_inbound_poll.py --commit
+```
+
+Commit only *after* handling — a crash before commit re-surfaces the message
+instead of silently dropping it. A message that arrives between your poll and your
+commit is never skipped; it appears on the next poll.
+
+### 3. Long-loop hygiene (extended autonomous loops)
+
+- Keep a compact `CURRENT_LOOP_STATE.md`: current hypothesis · best output so far ·
+  rejected/cold paths · next pass · last handled `message_id`. So a steer — or a
+  fresh session after a crash — can resume cold without re-deriving everything.
+- Separate your output surfaces: route file/visual work to an auto-refreshing
+  artifact or index; keep **chat for decisions, blockers, milestones, and ACKs
+  only** — not a play-by-play.
+
+> Soft (cooperative) interrupt only. The hard interrupt (dashboard button → daemon
+> end-turn → re-enqueue → submit) is a separate later feature that needs a daemon
+> change — not this.
