@@ -232,7 +232,20 @@ fi
 # {"claudeAiOauth":{"accessToken":...}} shape, so only the acquisition differs —
 # the parse below is shared. Gate on `security` (present only on macOS) so the
 # macOS path is unchanged.
-if command -v security &>/dev/null; then
+# CLAUDE_CREDS_FILE (opt-in): point at an alternate .credentials.json to read a
+# different Claude account's usage (e.g. a per-agent CLAUDE_CONFIG_DIR on the
+# split work-agent account). Unset = original behavior (Keychain / ~/.claude).
+if [[ -n "${CLAUDE_CREDS_FILE:-}" ]]; then
+  if [[ ! -f "$CLAUDE_CREDS_FILE" ]]; then
+    echo '{"error":"CLAUDE_CREDS_FILE set but not found: '"${CLAUDE_CREDS_FILE}"'"}' >&2
+    exit 1
+  fi
+  RAW_CREDS=$(cat "$CLAUDE_CREDS_FILE" 2>/dev/null || true)
+  if [[ -z "$RAW_CREDS" ]]; then
+    echo '{"error":"Could not read '"${CLAUDE_CREDS_FILE}"'"}' >&2
+    exit 1
+  fi
+elif command -v security &>/dev/null; then
   RAW_CREDS=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
   if [[ -z "$RAW_CREDS" ]]; then
     echo '{"error":"Claude Code credentials not found in Keychain"}' >&2
