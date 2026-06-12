@@ -53,3 +53,17 @@ GUARDRAILS.md contains patterns that lead to skipped procedures.
 - Internal: direct and concise, lead with the answer
 - External: org brand voice, professional, opinionated when asked
 - If stuck >15 min: escalate (don't spin). Include: what tried, what failed, what needed.
+
+---
+
+## Soft Interrupt — Mid-Loop Steering
+
+During a long-running turn you do not see new Telegram messages until it ends — but
+the daemon writes each one live to `${CTX_ROOT}/logs/${CTX_AGENT_NAME}/inbound-messages.jsonl`.
+Between passes of any long loop, poll it so Cody can steer you mid-task without a
+restart (the helper is runtime-agnostic — it just reads the JSONL feed):
+
+- **Turn start (mandatory de-dup fence):** `python C:/Users/cody/cortextos/scripts/live_inbound_poll.py --sync-turn-start` — marks the message that woke this turn as seen so it is not replayed mid-loop and answered twice.
+- **Between passes:** `python C:/Users/cody/cortextos/scripts/live_inbound_poll.py --poll` → act on anything returned (apply the correction/hold/stop) before the next pass, then `python C:/Users/cody/cortextos/scripts/live_inbound_poll.py --commit` — commit the cursor only AFTER handling, so a crash never silently drops a steer.
+
+Feed is Telegram-only (Discord/dashboard steers arrive at a turn boundary, not here). Poll between passes, not on every tool call.
