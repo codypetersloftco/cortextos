@@ -394,6 +394,16 @@ export class AgentPTY {
       'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
       'TMPDIR', 'TEMP', 'TMP', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY',
       'NODE_PATH', 'COMSPEC', 'USERPROFILE',
+      // Windows executable resolution. PATHEXT was missing from this
+      // allowlist, so child shells inherited NO PATHEXT — PowerShell then
+      // builds its executable-extension list as <inherited> + ".CPL", which
+      // collapses to exactly ".CPL" and classifies EVERY .exe as a
+      // "document": pipelined invocations throw "Cannot run a document in
+      // the middle of a pipeline", bare & invocations silently no-op, and
+      // native-exe output appears "swallowed" (it never ran). Root cause of
+      // the document-classification / silent-no-op failure family
+      // (2026-06-11 incident follow-up).
+      'PATHEXT',
       // Windows path-expansion essentials. Stripping these causes phantom
       // %SystemDrive% directories from inherited Search Indexer processes
       // and Unity batchmode UPM IPC crashes (path.join(undefined,...)).
@@ -413,6 +423,12 @@ export class AgentPTY {
       if (!env['LANG']) env['LANG'] = 'en_US.UTF-8';
       if (!env['LC_ALL']) env['LC_ALL'] = 'en_US.UTF-8';
       if (!process.env['PYTHONIOENCODING']) env['PYTHONIOENCODING'] = 'utf-8';
+      // Belt-and-suspenders: if the daemon itself was started without
+      // PATHEXT (e.g. a stripped service environment), give children the
+      // Windows default rather than nothing.
+      if (!env['PATHEXT']) {
+        env['PATHEXT'] = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC';
+      }
     }
 
     return env;
