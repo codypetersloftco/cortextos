@@ -9,6 +9,7 @@ const mockPty = {
   write: vi.fn(),
   getPid: vi.fn().mockReturnValue(12345),
   isAlive: vi.fn().mockReturnValue(true),
+  setTelegramHandle: vi.fn(),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
@@ -16,6 +17,13 @@ const mockPty = {
 
 vi.mock('../../../src/pty/agent-pty.js', () => ({
   AgentPTY: function AgentPTY() { return mockPty; },
+}));
+
+// The crash-budget classification tests exercise the codex-app-server runtime
+// (cold-start exit-0 / initialize-timeout). Shared mockPty so capturedOnExit
+// works identically regardless of runtime.
+vi.mock('../../../src/pty/codex-app-server-pty.js', () => ({
+  CodexAppServerPTY: function CodexAppServerPTY() { return mockPty; },
 }));
 
 const mockInjectMessage = vi.fn();
@@ -186,8 +194,12 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     // Simulate agent-manager.ts:stopAll() having written a fresh .daemon-stop
     // marker moments ago. handleExit should recognize the shutdown-in-progress
     // signal and bail out before touching the crash counter or restarts.log.
+    // Normalize separators before matching: on Windows, join() produces
+    // backslashes, so a forward-slash-only endsWith never matches and the
+    // marker mechanism goes UNVERIFIED on win32 (this was one of the known
+    // Windows test fails — the mock bug, not a product bug).
     fsMocks.existsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = String(p).replace(/\\/g, '/');
       return path.endsWith('/state/alice/.daemon-stop');
     });
     fsMocks.statSync.mockImplementation((p: any) => ({ mtimeMs: Date.now() - 2_000 }));
@@ -218,7 +230,7 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     // we do NOT want it to silently swallow genuine crashes hours later.
     // The 60s window in isDaemonShuttingDown() is the load-bearing check.
     fsMocks.existsSync.mockImplementation((p: any) =>
-      String(p).endsWith('/state/alice/.daemon-stop'),
+      String(p).replace(/\\/g, '/').endsWith('/state/alice/.daemon-stop'),
     );
     fsMocks.statSync.mockImplementation((p: any) => ({ mtimeMs: Date.now() - 3_600_000 })); // 1h old
 
@@ -572,5 +584,146 @@ describe('AgentProcess - inject serialization (#510)', () => {
     const r = await ap.injectMessageDetailed('stale');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('INJECT_FAILED');
+  });
+});
+
+describe('AgentProcess - crash-budget classification (shutdown exits + codex cold-start)', () => {
+  // Windows shutdown exit codes that must NOT debit the crash budget:
+  //   1073807364 = 0x40010004 DBG_TERMINATE_PROCESS (console-control kill)
+  //   3221225786 = 0xC000013A STATUS_CONTROL_C_EXIT
+  // At an abrupt machine reboot these reach handleExit with NO .daemon-stop
+  // marker (stopAll() never ran), so the marker classification cannot help.
+
+  it('console-control exit 1073807364 classifies as SHUTDOWN_EXIT — restart without crash debit', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    capturedOnExit!(1073807364, 0);
+
+    expect(ap.getStatus().status).toBe('crashed'); // restart scheduled
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    const line = String(fsMocks.appendFileSync.mock.calls[0][1]);
+    expect(line).toMatch(/\] SHUTDOWN_EXIT: exit_code=1073807364\b/);
+    expect(line).toContain('not counted toward max_crashes');
+    // No daily-counter write — the budget is untouched.
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('.crash_count_today'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('CTRL_C exit 3221225786 classifies as SHUTDOWN_EXIT — no crash debit', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    capturedOnExit!(3221225786, 0);
+
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    const line = String(fsMocks.appendFileSync.mock.calls[0][1]);
+    expect(line).toMatch(/\] SHUTDOWN_EXIT: exit_code=3221225786\b/);
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('.crash_count_today'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('an unlisted nonzero exit still counts as CRASH (narrow-classification guard)', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    capturedOnExit!(42, 0);
+
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    expect(String(fsMocks.appendFileSync.mock.calls[0][1])).toMatch(/\] CRASH: exit_code=42 /);
+  });
+
+  it('codex exit-0 within the cold-start window classifies as START_DEGRADED', async () => {
+    const ap = new AgentProcess('alice', mockEnv, { runtime: 'codex-app-server' });
+    await ap.start();
+    capturedOnExit!(0, 0);
+
+    expect(ap.getStatus().status).toBe('crashed'); // backoff restart scheduled
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    const line = String(fsMocks.appendFileSync.mock.calls[0][1]);
+    expect(line).toMatch(/\] START_DEGRADED: exit_code=0 start_degraded_count=1\b/);
+    expect(line).toContain('not counted toward max_crashes');
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('.crash_count_today'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('codex initialize JSON-RPC timeout during spawn classifies as START_DEGRADED, not CRASH', async () => {
+    mockPty.spawn.mockRejectedValueOnce(new Error('JSON-RPC request timed out: initialize'));
+    const ap = new AgentProcess('alice', mockEnv, { runtime: 'codex-app-server' });
+    await ap.start();
+
+    expect(ap.getStatus().status).toBe('crashed');
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    const line = String(fsMocks.appendFileSync.mock.calls[0][1]);
+    expect(line).toMatch(/\] START_DEGRADED: exit_code=1 start_degraded_count=1\b/);
+  });
+
+  it('codex exit-0 AFTER the cold-start window still counts as CRASH', async () => {
+    vi.useFakeTimers();
+    try {
+      const ap = new AgentProcess('alice', mockEnv, { runtime: 'codex-app-server' });
+      await ap.start();
+      vi.advanceTimersByTime(10 * 60 * 1000); // 10 min of healthy uptime
+      capturedOnExit!(0, 0);
+
+      const crashLine = fsMocks.appendFileSync.mock.calls
+        .map((c: any[]) => String(c[1]))
+        .find((l: string) => l.includes('] CRASH:'));
+      expect(crashLine).toBeDefined();
+      expect(crashLine).toMatch(/\] CRASH: exit_code=0 /);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('START_DEGRADED counter is bounded — halts with distinct wording when exhausted', async () => {
+    const ap = new AgentProcess('alice', mockEnv, { runtime: 'codex-app-server', max_crashes_per_day: 2 });
+    await ap.start();
+    capturedOnExit!(0, 0); // degraded start #1
+    await ap.start();
+    capturedOnExit!(0, 0); // degraded start #2 = bound -> halt
+
+    expect(ap.getStatus().status).toBe('halted');
+    const lines = fsMocks.appendFileSync.mock.calls.map((c: any[]) => String(c[1]));
+    expect(lines.some((l: string) => /\] START_DEGRADED_HALTED: /.test(l))).toBe(true);
+    // The CRASH budget was never touched.
+    expect(lines.some((l: string) => /\] CRASH: /.test(l))).toBe(false);
+  });
+
+  it('crash counter reconciles upward from durable restarts.log when the counter file is lost', async () => {
+    const today = new Date().toISOString().split('T')[0];
+    fsMocks.existsSync.mockImplementation((p: any) =>
+      String(p).replace(/\\/g, '/').endsWith('/logs/alice/restarts.log'),
+    );
+    fsMocks.readFileSync.mockImplementation((p: any) => {
+      if (String(p).replace(/\\/g, '/').endsWith('/logs/alice/restarts.log')) {
+        return (
+          `[${today}T01:00:00Z] CRASH: exit_code=1 crash_count=1 backoff_s=5\n` +
+          `[${today}T02:00:00Z] CRASH: exit_code=1 crash_count=2 backoff_s=10\n` +
+          `[${today}T03:00:00Z] SELF-RESTART: reason=planned\n`
+        );
+      }
+      return '';
+    });
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    capturedOnExit!(1, 0);
+
+    // 2 durable CRASH lines today + this crash = crash #3, even though
+    // .crash_count_today is missing (in-memory counter alone would say #1).
+    // Planned SELF-RESTART lines must not be counted. (The seeded lines are
+    // readFileSync content — only the live crash goes through appendFileSync.)
+    const crashLine = fsMocks.appendFileSync.mock.calls
+      .map((c: any[]) => String(c[1]))
+      .find((l: string) => l.includes('] CRASH:'));
+    expect(crashLine).toBeDefined();
+    expect(crashLine).toMatch(/crash_count=3\b/);
   });
 });

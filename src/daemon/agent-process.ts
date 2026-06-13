@@ -31,6 +31,16 @@ export class AgentProcess {
   private sessionTimer: ReturnType<typeof setTimeout> | null = null;
   private crashCount: number = 0;
   private maxCrashesPerDay: number = 10;
+  // Codex cold-start flakiness (exit-0 bootstrap / initialize JSON-RPC
+  // timeout) is tracked separately from real crashes so it cannot drain
+  // max_crashes_per_day. Bounded by the same configured limit, but its own
+  // ledger; resets with the daemon process (in-memory only by design — a
+  // daemon lifetime gets at most N degraded starts per agent).
+  private startDegradedCount: number = 0;
+  // Stamped at the top of every start(); used to tell a codex COLD-start
+  // exit-0 (bootstrap flake, within the window) from a long-running codex
+  // session dying with exit 0 (a real crash that must still count).
+  private lastSpawnAt: number = 0;
   // CrashLoopPauser (instar-inspired): sliding-window crash detection.
   // Timestamps of recent crashes within the configured window. If the
   // window fills, the agent auto-pauses instead of retrying with backoff.
@@ -174,6 +184,7 @@ export class AgentProcess {
     // new lifecycle began" — in which case it bails out without touching
     // handleExit, preventing spurious crash recovery on the new agent.
     const myGeneration = ++this.lifecycleGeneration;
+    this.lastSpawnAt = Date.now();
 
     // Create PTY — runtime-specific subclass handles binary, args, bootstrap detection
     const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
@@ -259,6 +270,19 @@ export class AgentProcess {
       this.log(`Failed to start: ${err}`);
       this.pty = null;
       this.clearSessionTimer();
+      // Codex cold-start flake: the initialize JSON-RPC round-trip timing out
+      // during spawn is start-up degradation (observed repeatedly on healthy
+      // installs), not an agent crash. Route it to the separate bounded
+      // start-degraded ledger so it cannot drain max_crashes_per_day. Every
+      // OTHER spawn failure (bad binary, ConPTY error, bad args) still flows
+      // through full crash accounting per OOM Wave 2 Patch 3.
+      if (
+        this.config.runtime === 'codex-app-server' &&
+        /JSON-RPC request timed out: initialize/.test(String(err))
+      ) {
+        this.handleStartDegraded(1, 'initialize JSON-RPC timeout');
+        return;
+      }
       this.handleExit(1);
     }
   }
@@ -653,6 +677,49 @@ export class AgentProcess {
       return;
     }
 
+    // Windows shutdown-casualty classification. At an ABRUPT machine reboot
+    // (power loss, Windows Update restart) the console subsystem terminates
+    // every PTY child directly — stopAll() never runs, so no .daemon-stop
+    // marker exists and the isDaemonShuttingDown() check above cannot help.
+    // Those children exit with one of exactly two codes:
+    //   1073807364 = 0x40010004 (console-control termination)
+    //   3221225786 = 0xC000013A STATUS_CONTROL_C_EXIT
+    // Verified in the 2026-06-09 reboot: boss/penny/analyst exited 1073807364
+    // and prism 3221225786, and each was charged a phantom "crash #1".
+    // Classify-and-restart WITHOUT charging (mirrors the image-poison block
+    // below): no daily-counter increment, no crash-window timestamp, distinct
+    // restarts.log tag. Deliberately NARROW (8a947ff precedent): exactly these
+    // two codes — every other nonzero exit still counts as a real crash.
+    if (exitCode === 1073807364 || exitCode === 3221225786) {
+      this.log(
+        `SHUTDOWN_EXIT: exit code ${exitCode} is a Windows console-control/CTRL_C shutdown casualty — restarting without counting against max_crashes_per_day.`,
+      );
+      this.appendCrashToRestartsLog(exitCode, 5000, 'SHUTDOWN_EXIT');
+      this.status = 'crashed';
+      this.notifyStatusChange();
+      setTimeout(() => {
+        if (this.status === 'crashed') {
+          this.start().catch(err => this.log(`Shutdown-exit restart failed: ${err}`));
+        }
+      }, 5000);
+      return;
+    }
+
+    // Codex cold-start exit-0 bootstrap flake: the app-server process exits
+    // cleanly moments after spawn before settling into its serving loop.
+    // Within the cold-start window this is start-up degradation, not a crash —
+    // route to the bounded start-degraded ledger (same treatment as the
+    // initialize-timeout path in start()'s catch). An exit 0 AFTER the window
+    // (a long-running codex session dying) falls through and still counts.
+    if (
+      this.config.runtime === 'codex-app-server' &&
+      exitCode === 0 &&
+      Date.now() - this.lastSpawnAt < AgentProcess.CODEX_COLD_START_WINDOW_MS
+    ) {
+      this.handleStartDegraded(0, 'exit-0 bootstrap');
+      return;
+    }
+
     // Image-poison auto-recovery (companion to PR #446's photo-injection fix).
     // Checked FIRST so a poisoned-context crash neither trips the crash-loop
     // window nor charges the daily counter — it is an upstream artifact, not
@@ -741,6 +808,46 @@ export class AgentProcess {
     setTimeout(() => {
       if (this.status === 'crashed') {
         this.start().catch(err => this.log(`Restart failed: ${err}`));
+      }
+    }, backoff);
+  }
+
+  // How long after spawn a codex exit-0 is treated as a cold-start flake.
+  // Generous enough to cover the observed bootstrap-exit cascade (40s/80s
+  // backoff climbs), short enough that an established session's death counts.
+  private static readonly CODEX_COLD_START_WINDOW_MS = 120_000;
+
+  /**
+   * Codex start-degraded accounting: cold-start flakiness (exit-0 bootstrap,
+   * initialize JSON-RPC timeout) restarts with the same exponential backoff
+   * as crash recovery but debits its OWN bounded counter, never
+   * max_crashes_per_day. Distinct log wording so operators (and the
+   * user-channel re-ranker) never see "crash" for a non-crash.
+   */
+  private handleStartDegraded(exitCode: number, reason: string): void {
+    this.startDegradedCount++;
+
+    if (this.startDegradedCount >= this.maxCrashesPerDay) {
+      this.log(
+        `HALTED: ${this.startDegradedCount} degraded codex starts (${reason}) — start-degraded bound reached, not restarting`,
+      );
+      this.appendCrashToRestartsLog(exitCode, 0, 'START_DEGRADED_HALTED');
+      this.status = 'halted';
+      this.notifyStatusChange();
+      return;
+    }
+
+    const backoff = Math.min(5000 * Math.pow(2, this.startDegradedCount - 1), 300000);
+    this.log(
+      `Start-degraded (codex cold-start, ${reason}): restart in ${backoff / 1000}s (degraded start #${this.startDegradedCount}, not counted toward max_crashes_per_day)`,
+    );
+    this.appendCrashToRestartsLog(exitCode, backoff, 'START_DEGRADED');
+    this.status = 'crashed';
+    this.notifyStatusChange();
+
+    setTimeout(() => {
+      if (this.status === 'crashed') {
+        this.start().catch(err => this.log(`Start-degraded restart failed: ${err}`));
       }
     }, backoff);
   }
@@ -1014,7 +1121,14 @@ export class AgentProcess {
   private appendCrashToRestartsLog(
     exitCode: number,
     backoffMs: number,
-    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'IMAGE_POISON_RECOVERY',
+    kind:
+      | 'CRASH'
+      | 'HALTED'
+      | 'CRASH_LOOP'
+      | 'IMAGE_POISON_RECOVERY'
+      | 'SHUTDOWN_EXIT'
+      | 'START_DEGRADED'
+      | 'START_DEGRADED_HALTED',
   ): void {
     try {
       const logDir = join(this.env.ctxRoot, 'logs', this.name);
@@ -1025,7 +1139,13 @@ export class AgentProcess {
           ? `exit_code=${exitCode} crash_count=${this.crashCount} max_crashes=${this.maxCrashesPerDay}`
           : kind === 'IMAGE_POISON_RECOVERY'
             ? `exit_code=${exitCode} backoff_s=${backoffMs / 1000} (not counted toward max_crashes)`
-            : `exit_code=${exitCode} crash_count=${this.crashCount} backoff_s=${backoffMs / 1000}`;
+            : kind === 'SHUTDOWN_EXIT'
+              ? `exit_code=${exitCode} backoff_s=${backoffMs / 1000} (Windows shutdown casualty — not counted toward max_crashes)`
+              : kind === 'START_DEGRADED'
+                ? `exit_code=${exitCode} start_degraded_count=${this.startDegradedCount} backoff_s=${backoffMs / 1000} (codex cold-start — not counted toward max_crashes)`
+                : kind === 'START_DEGRADED_HALTED'
+                  ? `exit_code=${exitCode} start_degraded_count=${this.startDegradedCount} max=${this.maxCrashesPerDay}`
+                  : `exit_code=${exitCode} crash_count=${this.crashCount} backoff_s=${backoffMs / 1000}`;
       const logLine = `[${timestamp}] ${kind}: ${details}\n`;
       appendFileSync(join(logDir, 'restarts.log'), logLine, 'utf-8');
     } catch {
@@ -1045,9 +1165,47 @@ export class AgentProcess {
           this.crashCount = 1;
         }
       }
+
+      // Reconcile against the durable record. restarts.log receives exactly
+      // one CRASH or HALTED line per counted crash, so today's line count is
+      // the floor for the daily budget. If the counter file was lost or reset
+      // (daemon restart, manual cleanup) the in-memory counter restarts at 1
+      // while the durable log still remembers — adopt the log-derived value.
+      // max() semantics: never adopt DOWNWARD, because .crash_count_today is
+      // also incremented by the SessionEnd crash-alert hook for exits the
+      // daemon never logs to restarts.log; those contributions must survive.
+      // (+1 = the crash being accounted right now, appended after this call.)
+      const loggedToday = this.countTodaysLoggedCrashes(today);
+      if (loggedToday + 1 > this.crashCount) {
+        this.log(
+          `Crash-count reconcile: restarts.log shows ${loggedToday} counted crashes today but counter said ${this.crashCount - 1} — adopting log-derived count ${loggedToday + 1}`,
+        );
+        this.crashCount = loggedToday + 1;
+      }
+
       ensureDir(join(this.env.ctxRoot, 'logs', this.name));
       writeFileSync(crashFile, `${today}:${this.crashCount}`, 'utf-8');
     } catch { /* ignore */ }
+  }
+
+  /**
+   * Count today's BUDGET-COUNTED crash lines in restarts.log: only `CRASH:`
+   * and `HALTED:` entries debit max_crashes_per_day. Planned restarts
+   * (SELF-RESTART/HARD-RESTART) and the non-counted classifications
+   * (CRASH_LOOP, IMAGE_POISON_RECOVERY, SHUTDOWN_EXIT, START_DEGRADED*) are
+   * deliberately excluded.
+   */
+  private countTodaysLoggedCrashes(today: string): number {
+    try {
+      const logPath = join(this.env.ctxRoot, 'logs', this.name, 'restarts.log');
+      if (!existsSync(logPath)) return 0;
+      return readFileSync(logPath, 'utf-8')
+        .split('\n')
+        .filter(l => l.startsWith(`[${today}`) && / (CRASH|HALTED): /.test(l))
+        .length;
+    } catch {
+      return 0;
+    }
   }
 
   private notifyStatusChange(): void {
