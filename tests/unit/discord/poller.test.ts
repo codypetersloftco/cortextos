@@ -181,3 +181,130 @@ describe('DiscordPoller — first-run seeding (no backlog replay)', () => {
     expect(readFileSync(join(stateDir, '.discord-offset'), 'utf-8').trim()).toBe('700');
   });
 });
+
+describe('DiscordPoller — failure watchdog (onDegraded)', () => {
+  let stateDir: string;
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'cortextos-discord-wd-'));
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  function authError(status: number): Error {
+    const e = new Error(`Discord API error ${status}: unauthorized`) as Error & { status?: number };
+    e.status = status;
+    return e;
+  }
+
+  /**
+   * API that throws `err` exactly k times, then succeeds (empty batch) and
+   * stops the poller on the first success — so a fake-timer advance never
+   * free-runs the healthy 2s loop (the fake-time-real-I/O flake class).
+   */
+  function apiFailsK(k: number, err: Error, getPoller: () => DiscordPoller): DiscordAPI {
+    let count = 0;
+    return {
+      getMessagesAfter: vi.fn(async () => {
+        if (count < k) { count++; throw err; }
+        getPoller().stop();
+        return [];
+      }),
+    } as unknown as DiscordAPI;
+  }
+
+  /** Run the loop to completion under fake timers. advanceMs must exceed the
+   *  cumulative backoff of all failing cycles. */
+  async function drive(poller: DiscordPoller, advanceMs: number): Promise<void> {
+    const loop = poller.start();
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    poller.stop();
+    await vi.advanceTimersByTimeAsync(61_000); // release any in-flight backoff sleep
+    await loop;
+  }
+
+  it('401 fires an auth degraded event on the FIRST failure, debounced after', async () => {
+    preSeed(stateDir, '0');
+    let poller: DiscordPoller;
+    const api = apiFailsK(3, authError(401), () => poller);
+    poller = new DiscordPoller(api, '999', stateDir);
+    const events: any[] = [];
+    poller.onDegraded((ev) => events.push(ev));
+
+    await drive(poller, 120_000); // 3 failures (~28s of backoff) then success
+
+    const auths = events.filter((e) => e.kind === 'auth');
+    expect(auths.length).toBe(1); // first failure alerted, #2/#3 debounced
+    expect(auths[0].status).toBe(401);
+    expect(auths[0].consecutiveErrors).toBe(1);
+  });
+
+  it('403 also classifies as auth and recovery fires after success', async () => {
+    preSeed(stateDir, '0');
+    let poller: DiscordPoller;
+    const api = apiFailsK(1, authError(403), () => poller);
+    poller = new DiscordPoller(api, '999', stateDir);
+    const events: any[] = [];
+    poller.onDegraded((ev) => events.push(ev));
+
+    await drive(poller, 60_000);
+
+    expect(events.map((e) => e.kind)).toEqual(['auth', 'recovered']);
+    expect(events[0].status).toBe(403);
+  });
+
+  it('transient errors stay SILENT below the threshold and recovery stays silent too', async () => {
+    preSeed(stateDir, '0');
+    let poller: DiscordPoller;
+    const api = apiFailsK(8, new Error('Discord API request timed out after 15s: GET /channels'), () => poller);
+    poller = new DiscordPoller(api, '999', stateDir);
+    const events: any[] = [];
+    poller.onDegraded((ev) => events.push(ev));
+
+    await drive(poller, 600_000); // 8 failures (~300s of backoff) then success
+
+    expect(events).toEqual([]); // below N=10: no degraded event, no recovery noise
+  });
+
+  it('transient errors fire ONE degraded event at the threshold (N=10), hourly-debounced after', async () => {
+    preSeed(stateDir, '0');
+    let poller: DiscordPoller;
+    const api = apiFailsK(25, new Error('Discord API error 503: upstream'), () => poller);
+    poller = new DiscordPoller(api, '999', stateDir);
+    const events: any[] = [];
+    poller.onDegraded((ev) => events.push(ev));
+
+    await drive(poller, 1_800_000); // 25 failures (~22min of backoff, < 1h debounce) then success
+
+    const transients = events.filter((e) => e.kind === 'transient');
+    expect(transients.length).toBe(1);
+    expect(transients[0].consecutiveErrors).toBe(10);
+    expect(events[events.length - 1].kind).toBe('recovered');
+  });
+
+  it('persists .discord-poller-health with consecutive count for the canary', async () => {
+    preSeed(stateDir, '0');
+    // Never-succeeding API with exact cycle control: 3 failures then we stop.
+    const err = authError(401);
+    const api = {
+      getMessagesAfter: vi.fn(async () => { throw err; }),
+    } as unknown as DiscordAPI;
+    const poller = new DiscordPoller(api, '999', stateDir);
+    poller.onDegraded(() => {});
+
+    const loop = poller.start();
+    await vi.advanceTimersByTimeAsync(13_000); // failures at 0s, 4s, 12s = 3 errors
+    poller.stop();
+    await vi.advanceTimersByTimeAsync(61_000);
+    await loop;
+
+    const healthPath = join(stateDir, '.discord-poller-health');
+    expect(existsSync(healthPath)).toBe(true);
+    const health = JSON.parse(readFileSync(healthPath, 'utf-8'));
+    expect(health.consecutive_poll_errors).toBe(3);
+    expect(health.last_error_status).toBe(401);
+    expect(health.degraded_alert_fired).toBe(true);
+  });
+});

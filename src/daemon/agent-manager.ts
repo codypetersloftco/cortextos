@@ -885,6 +885,30 @@ export class AgentManager {
     const stateDir = join(this.ctxRoot, 'state', name);
     const poller = new DiscordPoller(api, channelId, stateDir, 2000, log);
 
+    // Failure watchdog (prism red-team item 5): the poller classifies and
+    // debounces (auth = first occurrence, transient = 10 consecutive, hourly
+    // re-alert); this callback only owns the surfacing — orchestrator-session
+    // injection, Telegram-independent by design, mirroring the reject-watchdog
+    // alert below. Polling continues at max backoff in every degraded state,
+    // so a server-side fix (new token, restored perms) auto-recovers.
+    poller.onDegraded((ev) => {
+      const entry = this.agents.get(name);
+      if (ev.kind === 'recovered') {
+        log('Discord inbound poller RECOVERED after degraded state');
+        entry?.checker.queueTelegramMessage(
+          `=== SYSTEM NOTICE ===\n\`\`\`\nDiscord inbound poller RECOVERED — polling is healthy again on channel ${channelId}.\n\`\`\`\n\n`,
+        );
+        return;
+      }
+      const detail = ev.kind === 'auth'
+        ? `Discord poller AUTH failure (HTTP ${ev.status}) — bot token revoked or channel permissions changed. This will NOT self-heal: check DISCORD_BOT_TOKEN / channel permissions in secrets.env. Polling continues at max backoff and will auto-recover once fixed.`
+        : `Discord poller DEGRADED: ${ev.consecutiveErrors} consecutive poll failures (last: ${ev.message}). Likely Discord outage or network issue; polling continues with backoff.`;
+      log(`Discord poller degraded (${ev.kind}${ev.status ? ` HTTP ${ev.status}` : ''}, ${ev.consecutiveErrors} consecutive): alerting orchestrator session`);
+      entry?.checker.queueTelegramMessage(
+        `=== SYSTEM NOTICE ===\n\`\`\`\n${detail}\n\`\`\`\n\n`,
+      );
+    });
+
     const REJECT_ALERT_THRESHOLD = 3;
     const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
     const allowedSet = new Set(allowedIds);
