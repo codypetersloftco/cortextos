@@ -246,6 +246,19 @@ export class TelegramAPI {
   }
 
   /**
+   * Shared outbound-body formatter. Auto-wraps Win/UNC file paths as tap-to-copy
+   * code spans (HTML mode only) then converts Markdown to HTML. Used by both
+   * sendMessage AND media captions (sendPhoto/sendDocument) so the same command
+   * surface — send-telegram with or without --image/--file — formats paths
+   * identically. In plain-text mode it returns raw text (backticks would render
+   * literally; markdownToHtml skips escaping for plainText).
+   */
+  private renderBody(text: string, plainText: boolean): string {
+    const formatted = plainText ? text : autoFormatTelegramPaths(text);
+    return this.markdownToHtml(formatted, plainText);
+  }
+
+  /**
    * Send a text message. Converts Markdown to HTML and sends with
    * `parse_mode: "HTML"`. HTML mode never silently drops content — bad
    * markup produces an explicit API error rather than invisible text.
@@ -267,10 +280,7 @@ export class TelegramAPI {
     },
   ): Promise<any> {
     const plainText = opts?.parseMode === null;
-    // Auto-wrap Win/UNC file paths as tap-to-copy code spans (HTML mode only —
-    // in plain-text mode backticks would render literally). See autoFormatTelegramPaths.
-    const formatted = plainText ? text : autoFormatTelegramPaths(text);
-    const html = this.markdownToHtml(formatted, plainText);
+    const html = this.renderBody(text, plainText);
 
     await this.rateLimit(String(chatId));
 
@@ -338,6 +348,7 @@ export class TelegramAPI {
     imagePath: string,
     caption?: string,
     replyMarkup?: object,
+    opts?: { parseMode?: 'HTML' | null },
   ): Promise<any> {
     if (!existsSync(imagePath)) {
       throw new Error(`Image file not found: ${imagePath}`);
@@ -353,7 +364,11 @@ export class TelegramAPI {
     formData.append('chat_id', String(chatId));
     formData.append('photo', new Blob([fileData]), fileName);
     if (caption) {
-      formData.append('caption', caption);
+      // Same command surface as a text send-telegram → format the caption
+      // identically (auto-wrap paths + Markdown→HTML), unless explicit plain-text.
+      const plainText = opts?.parseMode === null;
+      formData.append('caption', this.renderBody(caption, plainText));
+      if (!plainText) formData.append('parse_mode', 'HTML');
     }
     if (replyMarkup) {
       formData.append('reply_markup', JSON.stringify(replyMarkup));
@@ -390,6 +405,7 @@ export class TelegramAPI {
     filePath: string,
     caption?: string,
     replyMarkup?: object,
+    opts?: { parseMode?: 'HTML' | null },
   ): Promise<any> {
     if (!existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -404,7 +420,11 @@ export class TelegramAPI {
     formData.append('chat_id', String(chatId));
     formData.append('document', new Blob([fileData]), fileName);
     if (caption) {
-      formData.append('caption', caption);
+      // Same command surface as a text send-telegram → format the caption
+      // identically (auto-wrap paths + Markdown→HTML), unless explicit plain-text.
+      const plainText = opts?.parseMode === null;
+      formData.append('caption', this.renderBody(caption, plainText));
+      if (!plainText) formData.append('parse_mode', 'HTML');
     }
     if (replyMarkup) {
       formData.append('reply_markup', JSON.stringify(replyMarkup));

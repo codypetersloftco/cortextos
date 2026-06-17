@@ -1009,10 +1009,14 @@ busCommand
     try {
       let sentMessageId = 0;
       if (opts.image) {
-        const result = await api.sendPhoto(chatId, opts.image, message);
+        const result = await api.sendPhoto(chatId, opts.image, message, undefined, {
+          parseMode: opts.plainText ? null : 'HTML',
+        });
         sentMessageId = result?.result?.message_id ?? 0;
       } else if (opts.file) {
-        const result = await api.sendDocument(chatId, opts.file, message);
+        const result = await api.sendDocument(chatId, opts.file, message, undefined, {
+          parseMode: opts.plainText ? null : 'HTML',
+        });
         sentMessageId = result?.result?.message_id ?? 0;
       } else {
         const result = await api.sendMessage(chatId, message, undefined, {

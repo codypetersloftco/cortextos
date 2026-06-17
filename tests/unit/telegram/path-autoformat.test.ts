@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
+import { writeFileSync, mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { autoFormatTelegramPaths, TelegramAPI } from '../../../src/telegram/api';
 
 // ---------------------------------------------------------------------------
@@ -123,5 +126,58 @@ describe('TelegramAPI.sendMessage path auto-format wiring', () => {
     await api.sendMessage('999', 'log at C:\\tmp\\run.log', undefined, { parseMode: null });
     expect(sent[0].text).toBe('log at C:\\tmp\\run.log');
     expect(sent[0].text).not.toContain('`');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Media captions (--image / --file) are the SAME command surface as a text
+// send-telegram, so a path in a caption must behave identically: wrapped +
+// normalized + parse_mode=HTML. Plain-text mode must skip both.
+// ---------------------------------------------------------------------------
+describe('TelegramAPI media-caption path auto-format', () => {
+  const originalFetch = globalThis.fetch;
+  let tmpFile: string;
+
+  beforeAll(() => {
+    const dir = mkdtempSync(join(tmpdir(), 'tg-caption-'));
+    tmpFile = join(dir, 'asset.bin');
+    writeFileSync(tmpFile, 'x');
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function captureMultipart() {
+    const sent: FormData[] = [];
+    globalThis.fetch = vi.fn(async (_url: any, init?: any) => {
+      sent.push(init.body as FormData);
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) } as any;
+    }) as any;
+    return sent;
+  }
+
+  it('wraps a Windows path in a --image caption as <code> + parse_mode HTML', async () => {
+    const sent = captureMultipart();
+    const api = new TelegramAPI('123:TEST');
+    await api.sendPhoto('999', tmpFile, 'see C:\\tmp\\x.png', undefined, { parseMode: 'HTML' });
+    expect(sent[0].get('caption')).toContain('<code>C:/tmp/x.png</code>');
+    expect(sent[0].get('parse_mode')).toBe('HTML');
+  });
+
+  it('wraps a Windows path in a --file caption as <code> + parse_mode HTML', async () => {
+    const sent = captureMultipart();
+    const api = new TelegramAPI('123:TEST');
+    await api.sendDocument('999', tmpFile, 'doc at C:\\a\\b.pdf', undefined, { parseMode: 'HTML' });
+    expect(sent[0].get('caption')).toContain('<code>C:/a/b.pdf</code>');
+    expect(sent[0].get('parse_mode')).toBe('HTML');
+  });
+
+  it('plain-text --image caption skips wrap AND parse_mode', async () => {
+    const sent = captureMultipart();
+    const api = new TelegramAPI('123:TEST');
+    await api.sendPhoto('999', tmpFile, 'see C:\\tmp\\x.png', undefined, { parseMode: null });
+    expect(sent[0].get('caption')).toBe('see C:\\tmp\\x.png');
+    expect(sent[0].get('parse_mode')).toBeNull();
   });
 });
