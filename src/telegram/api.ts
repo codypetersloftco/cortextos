@@ -80,6 +80,74 @@ export function formatValidateError(result: Extract<ValidateCredentialsResult, {
   }
 }
 
+/**
+ * Auto-format file paths for Telegram so the user can tap-to-copy them.
+ *
+ * Detects Windows drive paths (C:\\... or C:/...) and UNC paths (\\\\server\\...),
+ * wraps each in backticks (Telegram monospace = tap-to-copy), and normalizes
+ * backslashes to forward slashes INSIDE the span. The normalization is required,
+ * not cosmetic: per Cody's fleet rule, a backslash followed by t/n/r/b inside a
+ * Telegram code span renders as a tab/newline and visually corrupts the path
+ * (e.g. `...\\tools\\...` shows as `...<TAB>ools\\...`). Forward slashes are valid
+ * on Windows and preserve tap-to-copy. This automates the manual rule agents were
+ * previously told to apply by hand.
+ *
+ * False-positive guards (the brief's hard requirement):
+ *  - URLs (http://, https://, ...): the drive-letter lookbehind rejects a letter
+ *    before the colon (so the "s" in "https:" never starts a match), and the
+ *    "first separator not followed by another separator" guard rejects "://".
+ *  - times / ratios ("5:30", "16:9"): no letter+":"+separator structure.
+ *  - anything already inside a code span (``` fenced ``` or `inline`): those
+ *    regions are detected first and passed through untouched (no double-wrap).
+ *  - Unix paths are intentionally NOT matched (too noisy — bare "/usr/bin").
+ *
+ * Runs on RAW text BEFORE markdownToHtml, so the backticks it adds become <code>
+ * via the normal inline-code step. Only call in Markdown/HTML mode — in plain-text
+ * mode backticks would render literally.
+ *
+ * Known limitation (deliberate): a path that ENDS in a space-bearing folder with
+ * no trailing separator (e.g. "C:\\Claude Workspace" at end of a clause) wraps only
+ * up to the first space. Under-capture is the safe failure — over-capturing trailing
+ * prose would be a false positive, which the brief forbids.
+ */
+export function autoFormatTelegramPaths(text: string): string {
+  // Win drive path (C:\\... / C:/...) OR UNC (\\\\server\\share\\...).
+  // Intermediate segments may contain spaces (bounded by separators); the final
+  // segment may not, so trailing prose is never consumed.
+  const PATH =
+    /(?<![A-Za-z`])(?:[A-Za-z]:[\\/](?![\\/])(?:[^\\/:*?"<>|\r\n`]*[\\/])*[^\\/:*?"<>|\s`]*|\\\\(?:[^\\/:*?"<>|\r\n`]*[\\/])*[^\\/:*?"<>|\s`]*)/g;
+
+  const wrap = (segment: string): string =>
+    segment.replace(PATH, (raw) => {
+      // Peel a single trailing sentence-punctuation char (period/comma/paren/…)
+      // so "saved to C:\\a\\b.txt." keeps the period OUTSIDE the code span.
+      let path = raw;
+      let trailer = '';
+      if (/[.,;:!?)\]]$/.test(path)) {
+        trailer = path.slice(-1);
+        path = path.slice(0, -1);
+      }
+      // Require at least one separator after the drive/UNC prefix — guards against
+      // a bare "C:" that somehow slipped through.
+      if (!/[\\/]/.test(path.slice(2))) return raw;
+      return '`' + path.replace(/\\/g, '/') + '`' + trailer;
+    });
+
+  // Pass existing code spans (fenced + inline) through untouched; transform only
+  // the gaps between them so we never double-wrap or alter user-supplied code.
+  const CODE = /```[\s\S]*?```|`[^`\n]+`/g;
+  let out = '';
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CODE.exec(text)) !== null) {
+    out += wrap(text.slice(last, m.index));
+    out += m[0];
+    last = m.index + m[0].length;
+  }
+  out += wrap(text.slice(last));
+  return out;
+}
+
 export class TelegramAPI {
   private baseUrl: string;
   private lastSendTime: Map<string, number> = new Map();
@@ -199,7 +267,10 @@ export class TelegramAPI {
     },
   ): Promise<any> {
     const plainText = opts?.parseMode === null;
-    const html = this.markdownToHtml(text, plainText);
+    // Auto-wrap Win/UNC file paths as tap-to-copy code spans (HTML mode only —
+    // in plain-text mode backticks would render literally). See autoFormatTelegramPaths.
+    const formatted = plainText ? text : autoFormatTelegramPaths(text);
+    const html = this.markdownToHtml(formatted, plainText);
 
     await this.rateLimit(String(chatId));
 
