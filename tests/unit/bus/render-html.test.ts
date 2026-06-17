@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
 import { renderMarkdownToHtml, renderMarkdownIndex } from '../../../src/bus/render-html';
 
 // ---------------------------------------------------------------------------
@@ -185,5 +186,57 @@ describe('renderMarkdownIndex — multi-file (native, not a retrofit)', () => {
     ]);
     const ids = [...html.matchAll(/<section id="([^"]+)"/g)].map((m) => m[1]);
     expect(new Set(ids).size).toBe(2);
+  });
+});
+
+describe('renderMarkdownToHtml — link scheme sanitization (Prism block must-fix 1)', () => {
+  it('renders a javascript: link INERT (no anchor), label preserved', () => {
+    const html = renderMarkdownToHtml('click [x](javascript:alert(1))');
+    expect(html).not.toMatch(/<a\s+href=/i);
+    expect(html).not.toContain('href="javascript');
+    expect(html).toContain('x'); // label survives as text
+  });
+
+  it('renders a mixed-case JaVaScRiPt: link inert', () => {
+    const html = renderMarkdownToHtml('[x](JaVaScRiPt:alert(1))');
+    expect(html).not.toMatch(/<a\s+href=/i);
+  });
+
+  it('renders a control-char-prefixed javascript: link inert (fails closed)', () => {
+    const html = renderMarkdownToHtml('[x](' + String.fromCharCode(1) + 'javascript:alert(1))');
+    expect(html).not.toMatch(/<a\s+href=/i);
+  });
+
+  it('renders a data: link inert', () => {
+    const html = renderMarkdownToHtml('[x](data:text/html,foo)');
+    expect(html).not.toMatch(/<a\s+href=/i);
+  });
+
+  it('still renders a safe https link as an anchor', () => {
+    const html = renderMarkdownToHtml('[ok](https://example.com/a)');
+    expect(html).toContain('<a href="https://example.com/a">ok</a>');
+  });
+
+  it('still renders a mailto link as an anchor', () => {
+    const html = renderMarkdownToHtml('[mail](mailto:a@b.com)');
+    expect(html).toContain('<a href="mailto:a@b.com">mail</a>');
+  });
+
+  it('renders a local #anchor link', () => {
+    const html = renderMarkdownToHtml('[top](#section-1)');
+    expect(html).toContain('<a href="#section-1">top</a>');
+  });
+
+  it('sanitizes an unsafe scheme inside a table cell too', () => {
+    const md = '| Link |\n| --- |\n| [x](javascript:alert(1)) |';
+    const html = renderMarkdownToHtml(md);
+    expect(html).not.toMatch(/<a\s+href=/i);
+  });
+});
+
+describe('render-html source hygiene (Prism block must-fix 2)', () => {
+  it('the source file contains no NUL bytes (stays text-reviewable / non-binary)', () => {
+    const buf = readFileSync('src/bus/render-html.ts');
+    expect(buf.includes(0x00)).toBe(false);
   });
 });
