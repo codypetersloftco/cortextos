@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { join, basename } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
@@ -18,6 +18,7 @@ import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-stat
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
+import { renderMarkdownToHtml, renderMarkdownIndex } from '../bus/render-html.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
@@ -139,6 +140,41 @@ busCommand
       logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
     } catch { /* non-fatal */ }
     console.log(msgId);
+  });
+
+busCommand
+  .command('render-html')
+  .description('Render Markdown to a self-contained styled HTML report (no LLM, no external assets). Single: render-html <in.md> [out.html]. Multi: render-html --index <out.html> <a.md> <b.md> ...')
+  .argument('[inputs...]', 'Markdown input file(s). Single mode: <in.md> [out.html]. Multi (--index) mode: all positionals are input .md files.')
+  .option('--index <output>', 'Multi-file mode: concatenate all inputs into ONE HTML with a top table-of-contents, written to <output>')
+  .action((inputs: string[], opts: { index?: string }) => {
+    try {
+      if (opts.index) {
+        if (inputs.length === 0) {
+          console.error('Error: render-html --index needs at least one input .md file.');
+          process.exit(1);
+        }
+        const files = inputs.map((p) => {
+          if (!existsSync(p)) { console.error(`Error: input not found: ${p}`); process.exit(1); }
+          return { name: basename(p), content: readFileSync(p, 'utf8') };
+        });
+        writeFileSync(opts.index, renderMarkdownIndex(files));
+        console.log(opts.index);
+        return;
+      }
+      const input = inputs[0];
+      if (!input) {
+        console.error('Error: render-html needs an input .md file (or --index for multi-file).');
+        process.exit(1);
+      }
+      if (!existsSync(input)) { console.error(`Error: input not found: ${input}`); process.exit(1); }
+      const output = inputs[1] || input.replace(/\.md$/i, '') + '.html';
+      writeFileSync(output, renderMarkdownToHtml(readFileSync(input, 'utf8')));
+      console.log(output);
+    } catch (err) {
+      console.error(`render-html failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
   });
 
 busCommand
