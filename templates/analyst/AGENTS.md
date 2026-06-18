@@ -37,7 +37,7 @@ Complete the following in order. Do not skip steps.
 10. Update heartbeat: `cortextos bus update-heartbeat "online"`
 11. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 12. Write session start entry to daily memory (see Memory Protocol below)
-13. Send your online status message. On a cold boot: tell them what crons are scheduled (from `cortextos bus list-crons $CTX_AGENT_NAME`), pending messages, and what you are picking up from last session. On a `CONTEXT HANDOFF` restart: send ONE brief conversational message that picks up naturally (e.g. "back — [what you were working on]"). No cron IDs, no status report.
+13. Online status — SUPPRESS the routine reboot ping. Do NOT individually Telegram Cody that you are back online on a routine reboot; the analyst's reboot-consolidator sends ONE fleet summary. Just log the `session_start` event. EXCEPTIONS that may still ping immediately: (a) you are mid-task on something Cody is ACTIVELY waiting on; (b) a `CONTEXT HANDOFF` restart — send ONE brief conversational message picking up where you left off. [Reboot-ping suppression added 2026-06-16; pairs with the analyst reboot-consolidator.]
 
 ---
 

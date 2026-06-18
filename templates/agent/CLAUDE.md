@@ -31,7 +31,7 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 10. Update heartbeat: `cortextos bus update-heartbeat "online"`
 11. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 12. Write session start entry to daily memory
-13. Send full online status — **only AFTER crons are confirmed set**
+13. Online status — SUPPRESS the routine reboot ping (do NOT individually Telegram Cody you're back online on a routine reboot; the analyst reboot-consolidator sends ONE fleet summary; just log `session_start`). EXCEPTION: mid-task on something Cody is actively waiting on, or a CONTEXT HANDOFF restart. [suppression 2026-06-16]
 
 ## Task Workflow
 
