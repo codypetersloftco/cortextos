@@ -334,12 +334,55 @@ def _embed_with_retry(client, *, model, contents, embed_config, backoffs=(25, 35
     raise last_err if last_err else RuntimeError("embed retry loop completed without response or error")
 
 
+def _embed_local_ollama(model_name, content, config):
+    """Local embedding via a dedicated ollama instance — no quota, no cost, no cloud
+    dependency. `model_name` is the part after 'local:' (e.g. 'nomic-embed-text').
+    Endpoint resolves from config['embedding_host'] -> env OLLAMA_EMBED_URL ->
+    localhost:11434 (the project runs a DEDICATED embed instance on :11435 to keep
+    nomic isolated from the shared consensus-pair ollama). Text-only: memory/docs
+    are text; multimodal Parts are not supported on the local path."""
+    import urllib.request, urllib.error, json as _json
+    host = config.get("embedding_host") or os.environ.get("OLLAMA_EMBED_URL") or "http://localhost:11434"
+    url = host if host.rstrip("/").endswith("/api/embeddings") else host.rstrip("/") + "/api/embeddings"
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "\n".join(c for c in content if isinstance(c, str))
+        if not text:
+            raise ValueError("local embedder is text-only; received no text content (multimodal Parts unsupported)")
+    else:
+        text = str(content)
+    req = urllib.request.Request(
+        url,
+        data=_json.dumps({"model": model_name, "prompt": text}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = _json.loads(r.read())
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"local embedder unreachable at {url} (is the dedicated ollama serving '{model_name}'?): {e}") from e
+    emb = data.get("embedding")
+    if not emb:
+        raise RuntimeError(f"local embedder returned no vector (model={model_name}): {str(data)[:200]}")
+    return emb
+
+
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
-    """Embed content using Gemini Embedding 2. Content can be text string or list of Parts."""
+    """Embed content. Routes to a LOCAL ollama instance when embedding_model is
+    'local:<model>' (no quota, no cost) — covers BOTH ingest and query since every
+    embed path funnels through here — else Gemini Embedding. Content can be a text
+    string, or (Gemini path only) a list of Parts."""
+    model = config.get("embedding_model", "gemini-embedding-001")
+    if isinstance(model, str) and model.startswith("local:"):
+        emb = _embed_local_ollama(model.split("local:", 1)[1], content, config)
+        if _tracker:
+            _tracker.track_embedding(content)
+        return emb
     from google.genai import types
     result = _embed_with_retry(
         client,
-        model=config.get("embedding_model", "gemini-embedding-2-preview"),
+        model=model,
         contents=content,
         embed_config=types.EmbedContentConfig(
             output_dimensionality=config.get("embedding_dimensions", DEFAULT_EMBEDDING_DIMENSIONS),
@@ -349,6 +392,46 @@ def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
     if _tracker:
         _tracker.track_embedding(content)
     return result.embeddings[0].values
+
+
+def _embed_local_ollama_batch(model_name, texts, config):
+    """Batch local embedding via ollama /api/embed (input=array) — amortizes HTTP
+    overhead (~38x vs one-at-a-time: 50 texts in ~2.6s = ~19/sec). Returns a list of
+    vectors aligned to `texts`."""
+    import urllib.request, urllib.error, json as _json
+    host = config.get("embedding_host") or os.environ.get("OLLAMA_EMBED_URL") or "http://localhost:11434"
+    base = host.rstrip("/")
+    for suffix in ("/api/embeddings", "/api/embed"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    url = base + "/api/embed"
+    req = urllib.request.Request(
+        url,
+        data=_json.dumps({"model": model_name, "input": texts}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            data = _json.loads(r.read())
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"local batch embedder unreachable at {url}: {e}") from e
+    embs = data.get("embeddings")
+    if not embs or len(embs) != len(texts):
+        raise RuntimeError(f"local batch embedder returned {0 if not embs else len(embs)} vectors for {len(texts)} texts: {str(data)[:200]}")
+    return embs
+
+
+def embed_texts_batch(client, config, texts, task_type="RETRIEVAL_DOCUMENT"):
+    """Embed a LIST of texts. Local path batches via /api/embed (fast); Gemini path
+    loops embed_content (unchanged throttle/retry behavior). Returns list of vectors."""
+    model = config.get("embedding_model", "gemini-embedding-001")
+    if isinstance(model, str) and model.startswith("local:"):
+        embs = _embed_local_ollama_batch(model.split("local:", 1)[1], texts, config)
+        if _tracker:
+            for t in texts:
+                _tracker.track_embedding(t)
+        return embs
+    return [embed_content(client, config, t, task_type) for t in texts]
 
 
 def embed_multimodal(client, config, description_text, media_bytes, mime_type):
@@ -624,28 +707,38 @@ def ingest_text_file(client, config, collection, file_path):
         overlap=config.get("text_chunk_overlap", DEFAULT_TEXT_CHUNK_OVERLAP),
     )
 
-    count = 0
-    for i, chunk in enumerate(chunks):
-        doc_id = file_id(file_path, i)
-        if already_exists(collection, doc_id):
-            continue
+    # Collect chunks to ingest (respect --force / already_exists), then BATCH-embed +
+    # batch-upsert. Batching is the difference between ~0.5/sec (per-chunk HTTP) and
+    # ~19/sec (one /api/embed call per batch) on the local embedder.
+    to_do = [(i, c) for i, c in enumerate(chunks) if not already_exists(collection, file_id(file_path, i))]
+    if not to_do:
+        return 0
 
-        embedding = embed_content(client, config, chunk)
+    BATCH = int(os.environ.get("KB_EMBED_BATCH", "64"))
+    count = 0
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    total = len(chunks)
+    src = str(file_path.resolve())
+    for b in range(0, len(to_do), BATCH):
+        group = to_do[b:b + BATCH]
+        idxs = [i for i, _ in group]
+        texts = [c for _, c in group]
+        embs = embed_texts_batch(client, config, texts)
         collection.upsert(
-            ids=[doc_id],
-            embeddings=[embedding],
-            documents=[chunk],
+            ids=[file_id(file_path, i) for i in idxs],
+            embeddings=embs,
+            documents=texts,
             metadatas=[{
-                "source": str(file_path.resolve()),
+                "source": src,
                 "type": "text",
                 "chunk_index": i,
-                "total_chunks": len(chunks),
+                "total_chunks": total,
                 "filename": file_path.name,
                 "file_ext": file_path.suffix.lower(),
-                "ingested_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }],
+                "ingested_at": ts,
+            } for i in idxs],
         )
-        count += 1
+        count += len(group)
 
     return count
 
