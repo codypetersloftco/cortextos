@@ -3,21 +3,26 @@ import { readFileSync } from 'fs';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 
 /**
- * Phase-1 Sonnet worker-default rotation (exp_1781129540_te3sj).
+ * Worker-default model selection.
  *
- * Ephemeral workers spawned WITHOUT an explicit --model no longer inherit the
- * session/account default: they get Sonnet, except every Nth default spawn
- * which runs the previous model (Fable 5) as a concurrent control cohort —
- * this kills the time-confound a pre/post comparison would have.
+ * Ephemeral workers spawned WITHOUT an explicit --model get the DEFAULT model
+ * (Sonnet). The Sonnet-vs-Fable control-cohort experiment (exp_1781129540_te3sj)
+ * is RETIRED: Fable 5 was pulled, so hardcoding it as an every-Nth control made
+ * 1-in-N default spawns fail. There is NO control cohort by default anymore.
  *
- * The rotation counter is PERSISTED (state/_shared/worker-model-rotation.json)
- * so the every-Nth split survives daemon restarts; an in-memory counter would
- * reset on every restart and skew the cohort ratio. An explicit --model spawn
- * bypasses the rotation entirely and does NOT consume a counter slot.
+ * The control-overlay machinery is KEPT DORMANT for a future, OPT-IN experiment:
+ * set CTX_WORKER_CONTROL_MODEL=<model id> to run that model as an every-Nth control
+ * cohort, availability-GUARDED — a failed control spawn marks it unavailable for a
+ * cooldown, the rotation auto-skips to the default, and retries after the cooldown,
+ * so a pulled/unavailable control model can NEVER re-cause 1-in-N spawn failures.
+ * Unset / '' / off / none / disabled = no control cohort (the retired default).
+ *
+ * The rotation counter is PERSISTED (state/_shared/worker-model-rotation.json) so an
+ * opt-in every-Nth split survives daemon restarts. An explicit --model spawn bypasses
+ * selection entirely and does NOT consume a counter slot.
  */
 
 export const WORKER_DEFAULT_MODEL = 'claude-sonnet-4-6';
-export const WORKER_CONTROL_MODEL = 'claude-fable-5';
 export const CONTROL_EVERY_N = 4;
 
 const ROTATION_FILE = 'worker-model-rotation.json';
@@ -46,16 +51,15 @@ function controlHealthPath(ctxRoot: string): string {
 }
 
 /**
- * The control model to run for the control cohort, env-overridable at runtime.
- * - unset            -> the default experiment control (WORKER_CONTROL_MODEL)
- * - 'off'/'none'/'disabled'/'' -> control cohort DISABLED (Nth spawn uses the default
- *   model too) — lets ops pause a pulled/unavailable control model with NO daemon
- *   rebuild, just by setting the env on the next daemon start.
- * - any model id     -> run that as the control cohort.
+ * The control model for an OPT-IN control cohort, from env CTX_WORKER_CONTROL_MODEL.
+ * The Sonnet-vs-Fable experiment is RETIRED, so there is NO hardcoded control default:
+ * - unset / '' / 'off' / 'none' / 'disabled' -> null = NO control cohort (every spawn
+ *   gets the default model — the retired default).
+ * - any model id -> run that model as the every-Nth control cohort (availability-guarded).
  */
 function configuredControlModel(): string | null {
   const raw = process.env.CTX_WORKER_CONTROL_MODEL;
-  if (raw === undefined) return WORKER_CONTROL_MODEL;
+  if (raw === undefined) return null;
   const v = raw.trim();
   if (v === '' || v.toLowerCase() === 'off' || v.toLowerCase() === 'none' || v.toLowerCase() === 'disabled') {
     return null;
@@ -136,17 +140,17 @@ export function resolveWorkerModel(
     // Persistence is best-effort — the spawn must not fail on a state write.
   }
 
-  // Spawns 1..N-1 are Sonnet; spawn N is the control. (index is 0-based, so
-  // index 3, 7, 11... with N=4.)
-  if ((index + 1) % CONTROL_EVERY_N === 0) {
-    const control = configuredControlModel();
-    // Skip the control model when it's disabled (env) or recently-failed (cooldown)
-    // and route the Nth spawn to the default model — so a pulled/unavailable control
-    // model can NEVER fail 1-in-N spawns.
-    if (control && !controlCurrentlyUnavailable(ctxRoot, Date.now())) {
+  // Control cohort is OPT-IN (retired by default). Only when a control model is
+  // configured (env) does every Nth spawn run it — and then only if it's not in a
+  // failure cooldown, so a pulled/unavailable control model can NEVER fail 1-in-N
+  // (it skips to the default + self-heals after the cooldown).
+  const control = configuredControlModel();
+  if (control && (index + 1) % CONTROL_EVERY_N === 0) {
+    if (!controlCurrentlyUnavailable(ctxRoot, Date.now())) {
       return { model: control, cohort: 'control', rotationIndex: index };
     }
     return { model: WORKER_DEFAULT_MODEL, cohort: 'control-skipped', rotationIndex: index };
   }
+  // RETIRED default: no control cohort -> every default spawn uses the default model.
   return { model: WORKER_DEFAULT_MODEL, cohort: 'default', rotationIndex: index };
 }
