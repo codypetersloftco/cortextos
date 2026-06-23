@@ -16,6 +16,10 @@ export default defineConfig({
   test: {
     globals: true,
     testTimeout: 10000,
+    // Scrub inherited CTX_* env vars before each worker runs its tests, so the
+    // suite produces the same clean baseline whether invoked from CI or from a
+    // live cortextOS agent cwd. See tests/setup/scrub-ctx-env.ts.
+    setupFiles: ['tests/setup/scrub-ctx-env.ts'],
     include: [
       'tests/**/*.test.ts',
       'dashboard/src/**/__tests__/**/*.test.ts',
