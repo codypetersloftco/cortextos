@@ -770,6 +770,76 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       expect.anything(),
     );
   });
+
+  // Regression: prism->dbanalyst thread clobber (2026-06-24). All codex agents share
+  // one cwd, so the old continue-mode findLatestThreadForCwd() fallback adopted a
+  // sibling's thread when our own thread/resume failed transiently.
+  // INVARIANT (boss): an agent may only ever resume ITS OWN thread or a brand-new one — never a sibling's.
+  it('never adopts a sibling thread when persisted resume fails — starts fresh instead (continue mode)', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'my-own-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    // Own resume keeps timing out (transient cold-start failure); thread/list would surface a SIBLING's thread.
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'thread/resume') return Promise.reject(new Error('JSON-RPC request timed out: thread/resume'));
+      if (method === 'thread/list') return Promise.resolve({ result: { data: [{ id: 'sibling-thread-from-another-agent' }] } });
+      if (method === 'thread/start') return Promise.resolve({ result: { thread: { id: 'fresh-new-thread' } } });
+      return Promise.resolve({ result: {} });
+    });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    const resumedSibling = requestMock.mock.calls.some(
+      ([method, params]) => method === 'thread/resume'
+        && (params as { threadId?: string })?.threadId === 'sibling-thread-from-another-agent',
+    );
+    expect(resumedSibling).toBe(false);
+    // Falls back to a brand-new thread, never the sibling.
+    expect(requestMock).toHaveBeenCalledWith('thread/start', expect.anything());
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('codex-app-server-thread.json'),
+      expect.stringContaining('"threadId": "fresh-new-thread"'),
+      'utf-8',
+    );
+  });
+
+  it('retries its OWN threadId on a transient resume failure and resumes own thread (no fresh, no sibling)', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'my-own-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    let resumeAttempts = 0;
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'thread/resume') {
+        resumeAttempts += 1;
+        if (resumeAttempts === 1) return Promise.reject(new Error('JSON-RPC request timed out: thread/resume'));
+        return Promise.resolve({ result: { thread: { id: 'my-own-thread' } } });
+      }
+      if (method === 'thread/list') return Promise.resolve({ result: { data: [{ id: 'sibling-thread-from-another-agent' }] } });
+      if (method === 'thread/start') return Promise.resolve({ result: { thread: { id: 'fresh-new-thread' } } });
+      return Promise.resolve({ result: {} });
+    });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    expect(resumeAttempts).toBeGreaterThanOrEqual(2); // retried its own thread after the transient failure
+    expect(requestMock).not.toHaveBeenCalledWith('thread/start', expect.anything());
+    expect(requestMock).not.toHaveBeenCalledWith('thread/list', expect.anything());
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('codex-app-server-thread.json'),
+      expect.stringContaining('"threadId": "my-own-thread"'),
+      'utf-8',
+    );
+  });
 });
 
 describe('CodexAppServerPTY event handling', () => {
