@@ -943,7 +943,13 @@ export class AgentProcess {
     const onlineMessage = (isHandoffRestart || this.isBootPingSuppressed())
       ? ''
       : ' Send a Telegram message to the user saying you are back online.';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
+    // Suppress the agent-driven "Booting up... one moment" (AGENTS.md step 1) on a
+    // suppressed fleet so the reboot-consolidator is the single boot notifier. Solo
+    // (unsuppressed) agents keep it; handoff restarts already skip it via handoffUxOverride.
+    const skipBootMsg = (!isHandoffRestart && this.isBootPingSuppressed())
+      ? ' SUPPRESS BOOT PING: Do NOT send "Booting up... one moment" — skip AGENTS.md step 1 entirely (the fleet reboot-consolidator is the single boot notifier).'
+      : '';
+    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${skipBootMsg}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
@@ -955,7 +961,11 @@ export class AgentProcess {
     const onlineClause = this.isBootPingSuppressed()
       ? ''
       : ' After checking inbox, send a Telegram message to the user saying you are back online.';
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${onlineClause}`;
+    // A --continue refresh is never a fresh cold boot (history intact), so the
+    // "Booting up... one moment" courtesy (AGENTS.md step 1) is always pure noise
+    // here — skip it unconditionally, independent of the fleet suppression gate.
+    const skipBootMsg = ' SUPPRESS BOOT PING: Do NOT send "Booting up... one moment" — this is a --continue refresh with your history intact; skip AGENTS.md step 1 entirely.';
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${onlineClause}${skipBootMsg}`;
   }
 
   /**
