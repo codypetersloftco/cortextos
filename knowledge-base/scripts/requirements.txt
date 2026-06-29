@@ -1,4 +1,6 @@
-chromadb>=0.5.0
+# Pinned tight to the proven 1.5.x line. This is a 1.x-NATIVE store; do NOT
+# drop below 0.7 (mempalace's 0.6.x world) and re-test before raising the cap.
+chromadb>=1.5,<1.6
 google-genai>=1.0.0
 python-docx>=1.0.0
 python-pptx>=1.0.0

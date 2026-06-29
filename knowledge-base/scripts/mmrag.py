@@ -520,8 +520,32 @@ def describe_media(client, config, file_path, media_type="video"):
 # ---------------------------------------------------------------------------
 # ChromaDB
 # ---------------------------------------------------------------------------
+def _assert_native_1x_chromadb(chromadb):
+    """Refuse to open the org KB with chromadb < 0.7.
+
+    This store is a chromadb 1.x-native store (built on 1.5.x). A 0.x client
+    (e.g. mempalace's pinned 0.6.3 venv) cannot read it and would error or
+    attempt a migration that corrupts it. This is the mirror of the mempalace
+    guard, opposite direction — fail fast before constructing any client.
+    """
+    raw = getattr(chromadb, "__version__", "0")
+    try:
+        major_minor = tuple(int(p) for p in raw.split(".")[:2])
+    except ValueError:
+        major_minor = (0, 0)
+    if major_minor < (0, 7):
+        sys.stderr.write(
+            "FATAL [mmrag]: chromadb %s cannot safely open the 1.x-native org KB store.\n"
+            "  This store requires chromadb 1.5.x. A <0.7 client (e.g. mempalace's\n"
+            "  0.6.3 venv) would fail to read it or migrate/corrupt it. Run mmrag only\n"
+            "  in its own venv (cortextos\\knowledge-base\\venv). Aborting.\n" % raw
+        )
+        raise SystemExit(3)
+
+
 def get_chroma_collection(collection_name="default"):
     import chromadb
+    _assert_native_1x_chromadb(chromadb)
     client = chromadb.PersistentClient(path=str(CHROMADB_DIR))
     return client.get_or_create_collection(
         name=collection_name,
@@ -531,6 +555,7 @@ def get_chroma_collection(collection_name="default"):
 
 def get_chroma_client():
     import chromadb
+    _assert_native_1x_chromadb(chromadb)
     return chromadb.PersistentClient(path=str(CHROMADB_DIR))
 
 # ---------------------------------------------------------------------------
