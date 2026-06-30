@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   resolveWorkerModel,
+  markControlUnavailable,
   WORKER_DEFAULT_MODEL,
-  WORKER_CONTROL_MODEL,
   CONTROL_EVERY_N,
 } from '../../../src/daemon/worker-model-rotation.js';
+
+// The Sonnet-vs-Fable control experiment is RETIRED — there is no hardcoded control
+// model. A control cohort is OPT-IN via CTX_WORKER_CONTROL_MODEL; tests that exercise
+// it set this explicitly.
+const OPT_IN_CONTROL_MODEL = 'claude-opus-4-8';
 
 describe('resolveWorkerModel — phase-1 Sonnet rotation', () => {
   let ctxRoot: string;
@@ -36,7 +41,8 @@ describe('resolveWorkerModel — phase-1 Sonnet rotation', () => {
     expect(next.rotationIndex).toBe(0);
   });
 
-  it('defaults to Sonnet with every Nth spawn on the Fable control', () => {
+  it('RETIRED: with no control configured, EVERY spawn defaults to Sonnet (no Nth control)', () => {
+    delete process.env.CTX_WORKER_CONTROL_MODEL; // retired default = no control cohort
     const cohorts: string[] = [];
     const models: string[] = [];
     for (let i = 0; i < CONTROL_EVERY_N * 2; i++) {
@@ -45,16 +51,9 @@ describe('resolveWorkerModel — phase-1 Sonnet rotation', () => {
       models.push(c.model);
       expect(c.rotationIndex).toBe(i);
     }
-    // Spawns 1..N-1 default, spawn N control — repeated for the second cycle.
-    const expected = [
-      ...Array(CONTROL_EVERY_N - 1).fill('default'), 'control',
-      ...Array(CONTROL_EVERY_N - 1).fill('default'), 'control',
-    ];
-    expect(cohorts).toEqual(expected);
-    expect(models.filter(m => m === WORKER_CONTROL_MODEL)).toHaveLength(2);
-    expect(models.filter(m => m === WORKER_DEFAULT_MODEL)).toHaveLength(
-      CONTROL_EVERY_N * 2 - 2,
-    );
+    // No control cohort: every spawn (incl. the former Nth slots) is the default model.
+    expect(cohorts.every(c => c === 'default')).toBe(true);
+    expect(models.every(m => m === WORKER_DEFAULT_MODEL)).toBe(true);
   });
 
   it('persists the counter to disk (survives a daemon restart)', () => {
@@ -86,19 +85,78 @@ describe('resolveWorkerModel — phase-1 Sonnet rotation', () => {
   });
 });
 
+describe('resolveWorkerModel — graceful control-model skip (env + self-heal)', () => {
+  let ctxRoot: string;
+  const ENV = 'CTX_WORKER_CONTROL_MODEL';
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    ctxRoot = mkdtempSync(join(tmpdir(), 'cortextos-rotation-skip-'));
+    savedEnv = process.env[ENV];
+    delete process.env[ENV];
+  });
+
+  afterEach(() => {
+    rmSync(ctxRoot, { recursive: true, force: true });
+    if (savedEnv === undefined) delete process.env[ENV];
+    else process.env[ENV] = savedEnv;
+  });
+
+  const nthChoice = () => {
+    let c = resolveWorkerModel(ctxRoot);
+    for (let i = 1; i < CONTROL_EVERY_N; i++) c = resolveWorkerModel(ctxRoot);
+    return c; // the Nth (control slot)
+  };
+
+  it('env unset/off = RETIRED: no control cohort — Nth spawn is a plain default', () => {
+    process.env[ENV] = 'off';
+    const c = nthChoice();
+    expect(c.model).toBe(WORKER_DEFAULT_MODEL);
+    expect(c.cohort).toBe('default');
+  });
+
+  it('env override (opt-in) points the control cohort at a model', () => {
+    process.env[ENV] = OPT_IN_CONTROL_MODEL;
+    const c = nthChoice();
+    expect(c.model).toBe(OPT_IN_CONTROL_MODEL);
+    expect(c.cohort).toBe('control');
+  });
+
+  it('opt-in control + a fresh unavailable mark skips control (self-heal cooldown active)', () => {
+    process.env[ENV] = OPT_IN_CONTROL_MODEL;
+    markControlUnavailable(ctxRoot, Date.now(), 60_000); // unavailable for 60s
+    const c = nthChoice();
+    expect(c.model).toBe(WORKER_DEFAULT_MODEL);
+    expect(c.cohort).toBe('control-skipped');
+  });
+
+  it('opt-in control + an EXPIRED mark retries control (self-heals when model returns)', () => {
+    process.env[ENV] = OPT_IN_CONTROL_MODEL;
+    markControlUnavailable(ctxRoot, Date.now() - 120_000, 60_000); // expired 60s ago
+    const c = nthChoice();
+    expect(c.model).toBe(OPT_IN_CONTROL_MODEL);
+    expect(c.cohort).toBe('control');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // spawnWorker instrumentation: worker_spawned / worker_redo events
 // ---------------------------------------------------------------------------
 
 const { logEventMock } = vi.hoisted(() => ({ logEventMock: vi.fn() }));
 
+// The mock captures the onDone callback + records the last instance so a test
+// can simulate a worker exit with a given code (exercises the self-heal trigger).
+const workerInstances: any[] = [];
 vi.mock('../../../src/daemon/worker-process.js', () => ({
   WorkerProcess: class {
     name: string;
-    constructor(name: string) { this.name = name; }
-    onDone() { /* no-op */ }
+    _onDone: ((name: string, code: number) => void) | null = null;
+    constructor(name: string) { this.name = name; workerInstances.push(this); }
+    onDone(cb: (name: string, code: number) => void) { this._onDone = cb; }
     async spawn() { /* no-op */ }
     isFinished() { return true; }
+    fireExit(code: number) { this._onDone?.(this.name, code); }
   },
 }));
 
@@ -136,6 +194,7 @@ describe('AgentManager.spawnWorker — experiment instrumentation', () => {
 
   beforeEach(() => {
     logEventMock.mockClear();
+    workerInstances.length = 0;
     const testDir = mkdtempSync(join(tmpdir(), 'cortextos-spawn-instr-test-'));
     ctxRoot = join(testDir, 'instance');
     frameworkRoot = join(testDir, 'framework');
@@ -146,6 +205,38 @@ describe('AgentManager.spawnWorker — experiment instrumentation', () => {
   function eventsNamed(name: string) {
     return logEventMock.mock.calls.filter(c => c[4] === name);
   }
+
+  it('self-heal write-side: a CONTROL-cohort worker FAILURE writes the unavailable marker; default-failure + control-clean-exit do NOT', async () => {
+    // Opt in a control cohort (retired by default) so index 3/7 are control spawns.
+    const savedEnv = process.env.CTX_WORKER_CONTROL_MODEL;
+    process.env.CTX_WORKER_CONTROL_MODEL = OPT_IN_CONTROL_MODEL;
+    try {
+      const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+      const markerPath = join(ctxRoot, 'state', '_shared', 'worker-control-health.json');
+
+      // 8 spawns -> control cohort at rotation index 3 and 7 (CONTROL_EVERY_N=4).
+      for (let i = 0; i < 8; i++) {
+        await am.spawnWorker(`s${i}`, ctxRoot, 'task', 'engineer');
+      }
+
+      // A DEFAULT-cohort failure must NOT disable control (only control failures do).
+      workerInstances[0].fireExit(1);
+      expect(existsSync(markerPath)).toBe(false);
+
+      // A CONTROL-cohort CLEAN exit (0) must NOT disable control.
+      workerInstances[3].fireExit(0);
+      expect(existsSync(markerPath)).toBe(false);
+
+      // A CONTROL-cohort FAILURE writes the marker (the self-heal write-side = the defect this fixes).
+      workerInstances[7].fireExit(1);
+      expect(existsSync(markerPath)).toBe(true);
+      const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+      expect(marker.unavailable_until).toBeGreaterThan(Date.now());
+    } finally {
+      if (savedEnv === undefined) delete process.env.CTX_WORKER_CONTROL_MODEL;
+      else process.env.CTX_WORKER_CONTROL_MODEL = savedEnv;
+    }
+  });
 
   it('logs worker_spawned with model/cohort/task_class on a default spawn', async () => {
     const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
@@ -196,7 +287,8 @@ describe('AgentManager.spawnWorker — experiment instrumentation', () => {
     expect(meta.model).toBe(WORKER_DEFAULT_MODEL);
   });
 
-  it('every 4th default spawn runs the Fable control cohort', async () => {
+  it('RETIRED: every default spawn (incl. the former 4th slot) runs the default model — no control cohort', async () => {
+    delete process.env.CTX_WORKER_CONTROL_MODEL; // retired default
     const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
     for (const n of ['c1', 'c2', 'c3', 'c4']) {
       await am.spawnWorker(n, ctxRoot, 'task', 'engineer');
@@ -206,7 +298,7 @@ describe('AgentManager.spawnWorker — experiment instrumentation', () => {
     );
     expect(models).toEqual([
       WORKER_DEFAULT_MODEL, WORKER_DEFAULT_MODEL, WORKER_DEFAULT_MODEL,
-      WORKER_CONTROL_MODEL,
+      WORKER_DEFAULT_MODEL,
     ]);
   });
 });

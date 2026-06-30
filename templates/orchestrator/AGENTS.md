@@ -37,7 +37,7 @@ Complete the following in order. Do not skip steps.
 10. Update heartbeat: `cortextos bus update-heartbeat "online"`
 11. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 12. Write session start entry to daily memory (see Memory Protocol below)
-13. Send your online status message. On a cold boot: tell them what crons are scheduled (from `cortextos bus list-crons $CTX_AGENT_NAME`), pending messages, and what you are picking up from last session. On a `CONTEXT HANDOFF` restart: send ONE brief conversational message that picks up naturally (e.g. "back — [what you were working on]"). No cron IDs, no status report.
+13. Online status — FLEET-vs-SOLO gate. Run `cortextos status` and read agent uptimes: if **>=2 agents are fresh** (uptime <=30m) this is a FLEET reboot — **SUPPRESS** your individual online ping (the analyst reboot-consolidator sends the ONE fleet summary, you included); just log `session_start`. If **you (boss) are the ONLY fresh agent** — solo orchestrator recovery — **DO send** the online status (orchestrator-down is worth telling Cody, and the consolidator won't fire on a single). On a `CONTEXT HANDOFF` restart: send ONE brief conversational message as before. [Reboot-ping suppression added 2026-06-16; pairs with the analyst reboot-consolidator.]
 
 ---
 
@@ -296,7 +296,7 @@ The knowledge base is a semantic vector store (ChromaDB, Gemini Embedding 2). Th
 ```bash
 # Run on every heartbeat
 cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
-  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --collection memory-$CTX_AGENT_NAME --force
+  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 ```
 
 **When to query — before starting any task:**
@@ -318,7 +318,7 @@ cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
 cortextos bus kb-query "your question" --org $CTX_ORG --agent $CTX_AGENT_NAME
 
 # Query only your memory (past experiences, patterns)
-cortextos bus kb-query "question" --org $CTX_ORG --collection memory-$CTX_AGENT_NAME
+cortextos bus kb-query "question" --org $CTX_ORG --scope private --agent $CTX_AGENT_NAME
 
 # Ingest output to your private collection
 cortextos bus kb-ingest /path/to/output --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private

@@ -535,37 +535,46 @@ export class CodexAppServerPTY {
     this._rpc?.notify('initialized');
   }
 
-  private async startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> {
+  private async startOrResumeThread(_mode: 'fresh' | 'continue'): Promise<void> {
+    // INVARIANT: an agent may only ever resume ITS OWN persisted thread, or start a
+    // brand-new one. We must NEVER adopt "the latest thread for this cwd" — every codex
+    // agent runs with the same cwd (the shared working tree C:\Users\cody\cortextos), so
+    // a cwd-scoped lookup returns a SIBLING agent's thread. That fallback caused prism to
+    // resume dbanalyst's thread (prism ran as a 2nd Norma, 2026-06-24) when prism's own
+    // thread/resume hit a transient JSON-RPC timeout on cold-start. `_mode` no longer
+    // gates behavior: a persisted thread is resumed in either mode, otherwise we start fresh.
     const persisted = this.readThreadState();
     if (persisted) {
-      try {
-        const resumed = await this.request<ThreadResponse>('thread/resume', {
-          threadId: persisted.threadId,
-          cwd: this._cwd,
-          ...THREAD_PERMISSION_OVERRIDES,
-          excludeTurns: true,
-          persistExtendedHistory: true,
-        });
-        this.setThreadId(resumed.result?.thread.id || persisted.threadId);
-        return;
-      } catch (err) {
-        this._outputBuffer.push(`[codex-app-server] persisted resume failed: ${err}\n`);
+      // Retry transient resume failures (e.g. cold-start "JSON-RPC request timed out")
+      // before giving up — a transient failure must never escalate into starting fresh
+      // (let alone adopting a sibling). Only after the retries are exhausted do we treat
+      // our own thread as unrecoverable.
+      const resumeDelaysMs = [500, 1500];
+      for (let attempt = 0; attempt <= resumeDelaysMs.length; attempt += 1) {
+        try {
+          const resumed = await this.request<ThreadResponse>('thread/resume', {
+            threadId: persisted.threadId,
+            cwd: this._cwd,
+            ...THREAD_PERMISSION_OVERRIDES,
+            excludeTurns: true,
+            persistExtendedHistory: true,
+          });
+          this.setThreadId(resumed.result?.thread.id || persisted.threadId);
+          return;
+        } catch (err) {
+          this._outputBuffer.push(
+            `[codex-app-server] persisted resume failed (attempt ${attempt + 1}/${resumeDelaysMs.length + 1}): ${err}\n`,
+          );
+          if (attempt < resumeDelaysMs.length) {
+            await sleep(resumeDelaysMs[attempt]);
+          }
+        }
       }
-    }
-
-    if (mode === 'continue') {
-      const latest = await this.findLatestThreadForCwd();
-      if (latest) {
-        const resumed = await this.request<ThreadResponse>('thread/resume', {
-          threadId: latest,
-          cwd: this._cwd,
-          ...THREAD_PERMISSION_OVERRIDES,
-          excludeTurns: true,
-          persistExtendedHistory: true,
-        });
-        this.setThreadId(resumed.result?.thread.id || latest);
-        return;
-      }
+      // Own thread is unrecoverable after retries. Start a FRESH thread — never adopt
+      // another agent's latest-for-cwd thread.
+      this._outputBuffer.push(
+        `[codex-app-server] own thread ${persisted.threadId} unrecoverable after retries; starting a fresh thread (will NOT adopt another agent's latest-for-cwd thread)\n`,
+      );
     }
 
     const started = await this.request<ThreadResponse>('thread/start', {
@@ -576,17 +585,6 @@ export class CodexAppServerPTY {
       persistExtendedHistory: true,
     });
     this.setThreadId(started.result!.thread.id);
-  }
-
-  private async findLatestThreadForCwd(): Promise<string | null> {
-    const response = await this.request<{ data: Array<{ id: string; cwd?: string }> }>('thread/list', {
-      cwd: this._cwd,
-      limit: 1,
-      sortKey: 'updated_at',
-      sortDirection: 'desc',
-      archived: false,
-    });
-    return response.result?.data?.[0]?.id || null;
   }
 
   private queueTurn(input: unknown[]): void {

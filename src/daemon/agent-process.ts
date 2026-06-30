@@ -940,10 +940,16 @@ export class AgentProcess {
     const handoffUxOverride = isHandoffRestart
       ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
       : '';
-    const onlineMessage = isHandoffRestart
+    const onlineMessage = (isHandoffRestart || this.isBootPingSuppressed())
       ? ''
       : ' Send a Telegram message to the user saying you are back online.';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
+    // Suppress the agent-driven "Booting up... one moment" (AGENTS.md step 1) on a
+    // suppressed fleet so the reboot-consolidator is the single boot notifier. Solo
+    // (unsuppressed) agents keep it; handoff restarts already skip it via handoffUxOverride.
+    const skipBootMsg = (!isHandoffRestart && this.isBootPingSuppressed())
+      ? ' SUPPRESS BOOT PING: Do NOT send "Booting up... one moment" — skip AGENTS.md step 1 entirely (the fleet reboot-consolidator is the single boot notifier).'
+      : '';
+    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${skipBootMsg}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
@@ -952,7 +958,14 @@ export class AgentProcess {
     const deliverablesBlock = this.buildDeliverablesBlock();
     // Session refresh (--continue) is never a handoff restart.
     this.lastSpawnWasHandoff = false;
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After checking inbox, send a Telegram message to the user saying you are back online.`;
+    const onlineClause = this.isBootPingSuppressed()
+      ? ''
+      : ' After checking inbox, send a Telegram message to the user saying you are back online.';
+    // A --continue refresh is never a fresh cold boot (history intact), so the
+    // "Booting up... one moment" courtesy (AGENTS.md step 1) is always pure noise
+    // here — skip it unconditionally, independent of the fleet suppression gate.
+    const skipBootMsg = ' SUPPRESS BOOT PING: Do NOT send "Booting up... one moment" — this is a --continue refresh with your history intact; skip AGENTS.md step 1 entirely.';
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${onlineClause}${skipBootMsg}`;
   }
 
   /**
@@ -971,6 +984,26 @@ export class AgentProcess {
       return ` You also have ${overdue.length} overdue persistent reminder(s) from before this restart — handle each one, then run: cortextos bus ack-reminder <id>\n${items}`;
     } catch {
       return '';
+    }
+  }
+
+  /**
+   * Fleet-wide boot-ping suppression gate. When orgs/<org>/context.json sets
+   * suppress_boot_ping=true, the daemon omits the per-agent "back online"
+   * Telegram instruction from boot/continue prompts and skips the codex
+   * direct-send, so the analyst's reboot-consolidator is the single
+   * fleet-reboot notifier. Read fresh each boot so toggling needs no code
+   * change. Defaults false (preserve legacy ping) on missing file / parse error.
+   * Mirrors buildDeliverablesBlock's context.json read.
+   */
+  private isBootPingSuppressed(): boolean {
+    try {
+      const contextPath = join(this.env.frameworkRoot, 'orgs', this.env.org, 'context.json');
+      if (!existsSync(contextPath)) return false;
+      const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
+      return ctx.suppress_boot_ping === true;
+    } catch {
+      return false;
     }
   }
 
@@ -1031,6 +1064,7 @@ export class AgentProcess {
   private maybeSendCodexBootNotification(): void {
     if (this.config.runtime !== 'codex-app-server') return;
     if (this.lastSpawnWasHandoff) return;
+    if (this.isBootPingSuppressed()) return;
     if (!this.telegramApi || !this.telegramChatId) return;
     this.telegramApi
       .sendMessage(this.telegramChatId, `Agent ${this.name} is back online`)

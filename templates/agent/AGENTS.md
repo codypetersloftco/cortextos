@@ -42,7 +42,7 @@ Complete the following in order. Do not skip steps.
 11. Update heartbeat: `cortextos bus update-heartbeat "online"`
 12. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 13. Write session start entry to daily memory (see Memory Protocol below)
-14. Send your online status message. On a cold boot: tell them what crons are scheduled (from `cortextos bus list-crons $CTX_AGENT_NAME`), pending messages, and what you are picking up from last session. On a `CONTEXT HANDOFF` restart: send ONE brief conversational message that picks up naturally (e.g. "back — [what you were working on]"). No cron IDs, no status report.
+14. Online status — SUPPRESS the routine reboot ping. Do NOT individually Telegram Cody that you are back online on a routine reboot; the analyst's reboot-consolidator sends ONE fleet summary. Just log the `session_start` event. EXCEPTIONS that may still ping immediately: (a) you are mid-task on something Cody is ACTIVELY waiting on; (b) a `CONTEXT HANDOFF` restart — send ONE brief conversational message picking up where you left off. [Reboot-ping suppression added 2026-06-16; pairs with the analyst reboot-consolidator.]
 
 ---
 
@@ -301,7 +301,7 @@ The knowledge base is a semantic vector store (ChromaDB, Gemini Embedding 2). Th
 ```bash
 # Run on every heartbeat
 cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
-  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --collection memory-$CTX_AGENT_NAME --force
+  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force
 ```
 
 **When to query — before starting any task:**
@@ -323,7 +323,7 @@ cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
 cortextos bus kb-query "your question" --org $CTX_ORG --agent $CTX_AGENT_NAME
 
 # Query only your memory (past experiences, patterns)
-cortextos bus kb-query "question" --org $CTX_ORG --collection memory-$CTX_AGENT_NAME
+cortextos bus kb-query "question" --org $CTX_ORG --scope private --agent $CTX_AGENT_NAME
 
 # Ingest output to your private collection
 cortextos bus kb-ingest /path/to/output --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private

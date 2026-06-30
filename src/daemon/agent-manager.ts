@@ -12,7 +12,7 @@ import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
 import { surfaceWorkerExit } from './worker-exit-surface.js';
-import { resolveWorkerModel } from './worker-model-rotation.js';
+import { resolveWorkerModel, markControlUnavailable } from './worker-model-rotation.js';
 import { logEvent } from '../bus/event.js';
 import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
@@ -1346,6 +1346,14 @@ export class AgentManager {
     this.workers.set(name, worker);
 
     worker.onDone((workerName, exitCode) => {
+      // Self-heal the model rotation: if a CONTROL-cohort spawn failed (e.g. the
+      // control model was pulled/unavailable), mark control unavailable for a
+      // cooldown so subsequent Nth spawns skip to the default model instead of
+      // re-failing 1-in-N. The cooldown expiry auto-retries control = self-heals
+      // when the model returns.
+      if (choice.cohort === 'control' && exitCode !== 0) {
+        markControlUnavailable(this.ctxRoot);
+      }
       // Surface a FAILED exit (non-zero) before cleanup — fires at pty.onExit, so it
       // catches BOTH a graceful failure and a hard crash. Emits a durable
       // worker_failed event + best-effort parent message; clean exits stay silent.

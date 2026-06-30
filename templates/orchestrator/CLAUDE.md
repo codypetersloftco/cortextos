@@ -31,7 +31,7 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 10. Update heartbeat: `cortextos bus update-heartbeat "online"`
 11. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 12. Write session start entry to daily memory
-13. Send full online status — **only AFTER crons are confirmed set**
+13. Online status — FLEET-vs-SOLO gate (only AFTER crons confirmed): `cortextos status` -> >=2 fresh agents = FLEET reboot = SUPPRESS your ping (analyst consolidator summarizes); boss-alone-fresh = solo recovery = DO send online status. [suppression 2026-06-16]
 
 ## Task Workflow
 

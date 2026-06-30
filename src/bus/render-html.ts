@@ -1,0 +1,301 @@
+/**
+ * render-html — deterministic Markdown -> self-contained styled HTML report.
+ *
+ * Zero LLM authoring, zero external runtime deps, zero external assets: agents
+ * write Markdown (cheap, natural), this renders the WHOLE file to one styled,
+ * double-click-openable HTML document with inline CSS.
+ *
+ * SECURITY/CORRECTNESS CRUX: every text and code node is HTML-escaped BEFORE any
+ * tag is inserted, so report content can never inject markup or break the page.
+ * A literal `<script>` in the Markdown body renders as inert text. The only HTML
+ * tags in the output are the ones THIS renderer emits.
+ *
+ * This is intentionally a SEPARATE renderer from the Telegram markdownToHtml
+ * primitive (which is a Telegram-subset, no tables/headings) — keeping the
+ * report-grade parser off the hardened Telegram path.
+ *
+ * Coverage: h1-h4, paragraphs, bold/italic, inline code, fenced code blocks,
+ * GFM pipe tables, ordered + unordered nested lists, links, blockquotes, hr.
+ */
+
+// One shared inline-CSS template. Core lifted from the Cody-approved
+// KEYSTONE_NIGHT1 report, plus generic pre/blockquote/hr/p/a rules.
+const REPORT_CSS = `
+:root{--ink:#1a2233;--muted:#5b6677;--line:#e3e8ef;--accent:#2b5235;--warn:#b4690e;--good:#1f7a4d;--bg:#f7f9fc;--blue:#27468f;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+.wrap{max-width:100%;margin:0;padding:28px clamp(18px,4vw,64px) 60px;}
+h1{font-size:26px;margin:0 0 12px;border-bottom:3px solid var(--accent);padding-bottom:14px;}
+h2{font-size:19px;margin:34px 0 10px;color:var(--accent);border-bottom:1px solid var(--line);padding-bottom:5px;}
+h3{font-size:15.5px;margin:18px 0 6px;}
+h4{font-size:14px;margin:14px 0 4px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}
+p{margin:10px 0;}
+ol,ul{margin:8px 0 8px 4px;padding-left:22px;} li{margin:5px 0;}
+a{color:var(--blue);}
+code{background:#eef1f6;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font:13px/1.4 ui-monospace,Consolas,monospace;word-break:break-all;}
+pre{background:#f4f6fa;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto;margin:12px 0;}
+pre code{background:none;border:none;padding:0;display:block;white-space:pre;word-break:normal;}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13.5px;}
+th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top;} th{background:#eef2f7;}
+blockquote{margin:10px 0;padding:8px 14px;border-left:4px solid var(--line);color:var(--muted);background:#fff;}
+hr{border:none;border-top:1px solid var(--line);margin:22px 0;}
+.foot{color:var(--muted);font-size:13px;margin-top:36px;border-top:1px solid var(--line);padding-top:12px;}
+.toc{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px 18px;margin:14px 0 26px;font-size:14px;}
+.toc h2{margin:0 0 8px;border:none;padding:0;font-size:16px;color:var(--ink);}
+.toc ol{margin:0;} .toc a{color:var(--accent);text-decoration:none;} .toc a:hover{text-decoration:underline;}
+.doc{border-top:3px solid var(--accent);margin-top:36px;padding-top:10px;}
+.doc:first-of-type{border-top:none;margin-top:0;}
+`.trim();
+
+/** Escape the five HTML-significant characters. Always applied to text/code
+ * nodes BEFORE any renderer tag is inserted. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Strip simple inline markers for the <title> (which can't contain tags). */
+function stripMarkers(s: string): string {
+  return s.replace(/[*_`]/g, '');
+}
+
+/** Allowlist link schemes. Returns the (already-escaped) href if safe, else null.
+ * Only http:/https:/mailto: and local #anchors are allowed; javascript:, data:,
+ * vbscript:, and relative/other schemes render INERT. A browser-opened report can
+ * fold in untrusted-source content, so an unsafe href is a real XSS vector.
+ * A leading control char fails the scheme match below -> inert (fails closed). */
+function safeHref(escapedUrl: string): string | null {
+  const u = escapedUrl.replace(/^\s+/, ''); // strip leading whitespace
+  if (u.startsWith('#')) return u; // local anchor
+  const m = u.match(/^([a-z][a-z0-9+.-]*):/i); // scheme, case-insensitive
+  if (!m) return null; // no scheme / relative / leading-control -> inert in v1
+  const scheme = m[1].toLowerCase();
+  return scheme === 'http' || scheme === 'https' || scheme === 'mailto' ? u : null;
+}
+
+/**
+ * Inline Markdown -> HTML. Splits on inline code spans so code content is escaped
+ * but never re-processed, and everything else is escaped THEN given renderer tags.
+ * No string placeholder/sentinel -- avoids both NUL-binary source files and
+ * sentinel/content collisions. Links pass through safeHref(); disallowed schemes
+ * render inert (escaped label + escaped url in parens), never as an <a href>.
+ */
+function renderInline(raw: string): string {
+  return raw
+    .split(/(`[^`]+`)/g)
+    .map((part) => {
+      if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
+        return '<code>' + escapeHtml(part.slice(1, -1)) + '</code>';
+      }
+      // Non-code: escape first, then insert renderer tags.
+      let text = escapeHtml(part);
+      text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, url) => {
+        const href = safeHref(url);
+        return href === null ? `${label} (${url})` : `<a href="${href}">${label}</a>`;
+      });
+      text = text
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/__([^_]+)__/g, '<strong>$1</strong>');
+      text = text
+        .replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, '<em>$1</em>')
+        .replace(/(?<![_\w])_([^_\n]+)_(?![_\w])/g, '<em>$1</em>');
+      return text;
+    })
+    .join('');
+}
+
+
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map((c) => c.trim());
+}
+
+const DELIM_RE = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/;
+const ITEM_RE = /^(\s*)([-*+]|\d+\.)\s+(.*)$/;
+
+function isTableStart(lines: string[], i: number): boolean {
+  return lines[i].includes('|') && i + 1 < lines.length && DELIM_RE.test(lines[i + 1]);
+}
+
+/** Parse a (possibly nested) list starting at `start`. Returns [html, nextIndex]. */
+function parseList(lines: string[], start: number): [string, number] {
+  const indent = lines[start].match(/^(\s*)/)![1].length;
+  const ordered = /^\s*\d+\.\s+/.test(lines[start]);
+  const tag = ordered ? 'ol' : 'ul';
+  let html = `<${tag}>\n`;
+  let i = start;
+  while (i < lines.length) {
+    if (lines[i].trim() === '') break;
+    const m = lines[i].match(ITEM_RE);
+    if (!m) break;
+    const curIndent = m[1].length;
+    if (curIndent < indent) break; // dedent → belongs to an ancestor list
+    if (curIndent > indent) {
+      // Deeper item → nested list attached inside the previous <li>.
+      const [nested, consumed] = parseList(lines, i);
+      html = html.replace(/<\/li>\n$/, nested + '</li>\n');
+      i = consumed;
+      continue;
+    }
+    html += `<li>${renderInline(m[3].trim())}</li>\n`;
+    i++;
+  }
+  html += `</${tag}>\n`;
+  return [html, i];
+}
+
+/** Parse a Markdown string into its body HTML + the title (first H1, or '').
+ * The single-file and multi-file renderers both build on this. */
+function parseBlocks(md: string): { title: string; body: string } {
+  const lines = md.replace(/\r\n?/g, '\n').split('\n');
+  const out: string[] = [];
+  let title = '';
+  let titleSet = false;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.trim() === '') { i++; continue; }
+
+    // Fenced code block.
+    if (/^\s*```/.test(line)) {
+      i++;
+      const buf: string[] = [];
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length) i++; // closing fence
+      out.push('<pre><code>' + escapeHtml(buf.join('\n')) + '</code></pre>');
+      continue;
+    }
+
+    // Heading (h1-h4; deeper clamps to h4).
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const level = Math.min(h[1].length, 4);
+      const content = h[2].trim();
+      if (h[1].length === 1 && !titleSet) { title = content; titleSet = true; }
+      out.push(`<h${level}>` + renderInline(content) + `</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // Horizontal rule.
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+
+    // Blockquote (consecutive > lines).
+    if (/^\s*>/.test(line)) {
+      const buf: string[] = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+      out.push('<blockquote>' + renderInline(buf.join(' ')) + '</blockquote>');
+      continue;
+    }
+
+    // GFM pipe table.
+    if (isTableStart(lines, i)) {
+      const header = splitRow(line);
+      i += 2; // skip header + delimiter rows
+      const body: string[][] = [];
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') { body.push(splitRow(lines[i])); i++; }
+      let t = '<table>\n<thead>\n<tr>' + header.map((c) => `<th>${renderInline(c)}</th>`).join('') + '</tr>\n</thead>\n<tbody>\n';
+      for (const r of body) t += '<tr>' + r.map((c) => `<td>${renderInline(c)}</td>`).join('') + '</tr>\n';
+      t += '</tbody>\n</table>';
+      out.push(t);
+      continue;
+    }
+
+    // List (ordered/unordered, nested).
+    if (ITEM_RE.test(line)) {
+      const [listHtml, consumed] = parseList(lines, i);
+      out.push(listHtml);
+      i = consumed;
+      continue;
+    }
+
+    // Paragraph: gather consecutive lines until a blank or a new block starts.
+    const para: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !/^\s*```/.test(lines[i]) &&
+      !/^(#{1,6})\s+/.test(lines[i]) &&
+      !/^\s*>/.test(lines[i]) &&
+      !/^\s*([-*_])(\s*\1){2,}\s*$/.test(lines[i]) &&
+      !ITEM_RE.test(lines[i]) &&
+      !isTableStart(lines, i)
+    ) {
+      para.push(lines[i]); i++;
+    }
+    if (para.length) out.push('<p>' + renderInline(para.join(' ')) + '</p>');
+    else i++;
+  }
+
+  return { title, body: out.join('\n') };
+}
+
+/** Wrap inner HTML in the self-contained document shell with inline CSS. */
+function docShell(title: string, inner: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(stripMarkers(title))}</title>
+<style>${REPORT_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+${inner}
+</div>
+</body>
+</html>
+`;
+}
+
+/** URL-anchor slug: lowercase, non-alphanumeric runs -> '-', trimmed. */
+function slug(s: string): string {
+  return stripMarkers(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'section';
+}
+
+/** Render a Markdown string to a full self-contained HTML document. */
+export function renderMarkdownToHtml(md: string): string {
+  const { title, body } = parseBlocks(md);
+  return docShell(title || 'Report', body);
+}
+
+/**
+ * Render multiple Markdown files into ONE self-contained HTML document with a
+ * top table-of-contents and each file as its own clearly-delimited, anchored,
+ * titled section. Thin wrapper over the single-doc parser — same escaping crux
+ * carried through every section.
+ */
+export function renderMarkdownIndex(files: Array<{ name: string; content: string }>): string {
+  const used = new Set<string>();
+  const toc: string[] = [];
+  const sections: string[] = [];
+
+  for (const f of files) {
+    const { title, body } = parseBlocks(f.content);
+    const displayTitle = title || f.name;
+    // Unique anchor even if two docs share a title.
+    let id = slug(displayTitle);
+    if (used.has(id)) {
+      let n = 2;
+      while (used.has(`${id}-${n}`)) n++;
+      id = `${id}-${n}`;
+    }
+    used.add(id);
+    // If the doc had no H1, give the section a heading from its filename so it
+    // is clearly identified; otherwise the doc's own H1 is the visible title.
+    const inner = title ? body : `<h1>${escapeHtml(f.name)}</h1>\n${body}`;
+    sections.push(`<section id="${id}" class="doc">\n${inner}\n</section>`);
+    toc.push(`<li><a href="#${id}">${escapeHtml(displayTitle)}</a></li>`);
+  }
+
+  const nav = `<nav class="toc">\n<h2>Contents</h2>\n<ol>\n${toc.join('\n')}\n</ol>\n</nav>`;
+  return docShell('Report Index', `${nav}\n${sections.join('\n')}`);
+}
