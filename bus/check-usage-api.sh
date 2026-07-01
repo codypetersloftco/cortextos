@@ -341,9 +341,12 @@ except: print(9999)
 " 2>/dev/null || echo 9999)
   if python3 -c "import sys; sys.exit(0 if float('${CODEX_EXPIRES}') < 24 else 1)" 2>/dev/null; then
     SEND_MSG="Warning: Codex OAuth token expires in ${CODEX_EXPIRES}h. Run Codex and re-authenticate."
-    if [[ -f "$SCRIPT_DIR/send-telegram.sh" ]]; then
-      bash "$SCRIPT_DIR/send-telegram.sh" "$CHAT_ID" "$SEND_MSG" 2>/dev/null || true
-    fi
+    # NOTE (analyst 2026-07-01): DO NOT Telegram this — the Codex ACCESS token is
+    # short-lived by design and auto-refreshes via its refresh token, so exp<24h is
+    # a normal cycle, NOT an action item. Pushing it nags Cody with a false alarm
+    # (flagged 6/29-30, and again 7/1). Real auth failure surfaces as a failed
+    # wham/usage call, which is handled separately. Matches upstream PR #684.
+    # Kept as stderr for our own logs only; no send-telegram.
     echo "$SEND_MSG" >&2
   fi
 
