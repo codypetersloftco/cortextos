@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { listAgents, notifyAgent } from '../../../src/bus/agents';
+import { listAgents, notifyAgent, assertDeliverableRecipient } from '../../../src/bus/agents';
 import type { BusPaths } from '../../../src/types';
 
 describe('Agent Discovery', () => {
@@ -228,6 +228,55 @@ describe('Agent Discovery', () => {
       notifyAgent(paths, 'sender', 'newagent', 'Hello', ctxRoot);
 
       expect(existsSync(stateDir)).toBe(true);
+    });
+  });
+
+  // task_1782943545090: send-message / task-assign roster validation — a typo or
+  // retired pseudonym must fail loudly, not silently dead-letter to an unwatched inbox.
+  describe('assertDeliverableRecipient', () => {
+    function enableAgent(name: string, org = 'acme') {
+      const configDir = join(ctxRoot, 'config');
+      mkdirSync(configDir, { recursive: true });
+      const file = join(configDir, 'enabled-agents.json');
+      const cur = existsSync(file) ? JSON.parse(readFileSync(file, 'utf-8')) : {};
+      cur[name] = { org, enabled: true };
+      writeFileSync(file, JSON.stringify(cur));
+    }
+
+    it('accepts a known enabled agent', () => {
+      enableAgent('dbanalyst');
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'dbanalyst')).not.toThrow();
+    });
+
+    it('accepts a name that has an existing inbox dir (worker/prestage/system)', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'worker-abc123'), { recursive: true });
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'worker-abc123')).not.toThrow();
+    });
+
+    it('rejects an unknown name with a roster hint', () => {
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'nobody')).toThrow(/not a known agent or worker/);
+    });
+
+    it('rejects a retired pseudonym alias and suggests the registry name', () => {
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'norma')).toThrow(/not a deliverable recipient.*dbanalyst/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'forge')).toThrow(/not a deliverable recipient.*engineer/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'sentinel')).toThrow(/not a deliverable recipient.*analyst/);
+    });
+
+    it('rejects template-default orchestrator names (chief/orchestrator) and suggests boss', () => {
+      // task_1782937946305: the crash-alert emitter and worker report-back defaulted
+      // to a hardcoded 'chief'/'orchestrator' with no consumer here.
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'chief')).toThrow(/not a deliverable recipient.*boss/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'orchestrator')).toThrow(/not a deliverable recipient.*boss/);
+    });
+
+    it('rejects an alias EVEN IF an orphan inbox dir exists (grandfather guard)', () => {
+      // The exact bug: a prior dead-letter created inbox/norma/ or inbox/chief/.
+      // Dir-existence must NOT grandfather the dead name in — the alias map overrides.
+      mkdirSync(join(ctxRoot, 'inbox', 'norma'), { recursive: true });
+      mkdirSync(join(ctxRoot, 'inbox', 'chief'), { recursive: true });
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'norma')).toThrow(/not a deliverable recipient/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'chief')).toThrow(/not a deliverable recipient/);
     });
   });
 });

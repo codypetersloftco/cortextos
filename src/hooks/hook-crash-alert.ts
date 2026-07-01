@@ -471,7 +471,13 @@ async function main(): Promise<void> {
       lastTask,
       crashCount,
       restartAttempted,
-      recipients: ['chief', 'analyst'],
+      // Fix (task_1782937946305): 'chief' is a template-default orchestrator name
+      // with no consumer in this org, so the chief-addressed copy of every crash
+      // alert dead-lettered (only the analyst copy delivered). Resolve to the real
+      // org orchestrator so the alert reaches it; dedupe in case it equals analyst.
+      // Pairs with the roster-validation deploy — that fix would otherwise make the
+      // dead 'chief' recipient hard-reject at the CLI send-message layer.
+      recipients: [...new Set([process.env.CTX_ORCHESTRATOR_AGENT || 'boss', 'analyst'])],
     });
   }
 

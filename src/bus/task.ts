@@ -264,6 +264,7 @@ export function updateTask(
   paths: BusPaths,
   taskId: string,
   status: TaskStatus,
+  newAssignee?: string,
 ): void {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
@@ -279,12 +280,17 @@ export function updateTask(
     prevStatus = task.status;
     assignee = task.assigned_to;
     task.status = status;
+    // Reassignment (task_1782873111596): allow update-task to move ownership so a
+    // mis-assigned/orphaned task can be re-routed without recreating it. Recipient
+    // is roster-validated at the CLI layer before this runs.
+    if (newAssignee !== undefined) task.assigned_to = newAssignee;
     task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     atomicWriteSync(filePath, JSON.stringify(task));
   } catch (err) {
     throw new Error(`Task ${taskId} update failed: ${err}`);
   }
-  appendTaskAudit(paths, taskId, { event: 'update', agent: assignee || 'unknown', from: prevStatus, to: status });
+  const reassignNote = newAssignee !== undefined && newAssignee !== assignee ? ` (reassigned ${assignee || 'none'} -> ${newAssignee})` : undefined;
+  appendTaskAudit(paths, taskId, { event: 'update', agent: assignee || 'unknown', from: prevStatus, to: status, ...(reassignNote ? { note: reassignNote } : {}) });
 }
 
 /**

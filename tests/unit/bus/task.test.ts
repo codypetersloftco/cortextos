@@ -101,6 +101,25 @@ describe('Task Management', () => {
       const content = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
       expect(content.status).toBe('in_progress');
     });
+
+    // task_1782873111596: reassignment — move ownership of a mis-assigned task
+    // without recreating it.
+    it('reassigns assigned_to when a new assignee is passed', () => {
+      const taskId = createTask(paths, 'paul', 'acme', 'Orphaned task', { assignee: 'boris' });
+      updateTask(paths, taskId, 'in_progress', 'paul');
+
+      const content = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
+      expect(content.status).toBe('in_progress');
+      expect(content.assigned_to).toBe('paul');
+    });
+
+    it('leaves assigned_to unchanged when no assignee is passed', () => {
+      const taskId = createTask(paths, 'paul', 'acme', 'Keep owner', { assignee: 'boris' });
+      updateTask(paths, taskId, 'blocked');
+
+      const content = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
+      expect(content.assigned_to).toBe('boris');
+    });
   });
 
   describe('completeTask', () => {

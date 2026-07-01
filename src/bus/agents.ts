@@ -5,6 +5,54 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { sendMessage } from './message.js';
 
 /**
+ * Known non-recipient names → the registry name they should resolve to. A send to
+ * one of these ALWAYS rejects with a suggestion — this overrides the inbox-dir
+ * existence test below, since orphaned dead-letter dirs (e.g. an inbox/norma/ or
+ * inbox/chief/ created by the very bugs we are fixing) would otherwise grandfather
+ * the dead name in forever. task_1782943545090 / task_1782937946305.
+ */
+export const RECIPIENT_ALIASES: Record<string, string> = {
+  // Retired agent pseudonyms (Cody governance 2026-07-01).
+  norma: 'dbanalyst',
+  forge: 'engineer',
+  sentinel: 'analyst',
+  // Template-default orchestrator names with no consumer in this org — a hardcoded
+  // 'chief'/'orchestrator' recipient silently dead-lettered crash alerts + worker
+  // completion reports. Suggest the real org orchestrator.
+  orchestrator: 'boss',
+  chief: 'boss',
+};
+
+/**
+ * Validate that `name` is a deliverable message/task recipient before we write to
+ * its inbox (roster-validation, task_1782943545090). Throws with a self-correcting
+ * suggestion on an unknown or retired name so a typo/pseudonym fails loudly instead
+ * of silently dead-lettering to an unwatched inbox/<name>/ dir.
+ *
+ * Legit recipients: known agents (listAgents — dir scan + enabled-agents.json) OR
+ * any name that already has an inbox dir. Ephemeral workers create their inbox at
+ * spawn (worker-process.ts) and enabled agents at enable time, so inbox-existence
+ * covers workers/prestage/system without enumerating every pattern — provided the
+ * deploy paired an orphan-inbox hygiene sweep so the signal stays honest.
+ */
+export function assertDeliverableRecipient(ctxRoot: string, org: string | undefined, name: string): void {
+  const suggestion = RECIPIENT_ALIASES[name];
+  if (suggestion) {
+    throw new Error(
+      `'${name}' is not a deliverable recipient — did you mean '${suggestion}'? ` +
+      `(cortextos bus list-agents). Message not delivered.`,
+    );
+  }
+  const known = listAgents(ctxRoot, org).some((a) => a.name === name);
+  if (known) return;
+  if (existsSync(join(ctxRoot, 'inbox', name))) return;
+  throw new Error(
+    `'${name}' is not a known agent or worker — check the roster with 'cortextos bus list-agents'. ` +
+    `Message not delivered (was it a typo or a retired name?).`,
+  );
+}
+
+/**
  * List all agents in the system.
  *
  * Merges two sources of truth:
