@@ -14,6 +14,7 @@ import { resolvePaths } from '../utils/paths.js';
 import { surfaceWorkerExit } from './worker-exit-surface.js';
 import { resolveWorkerModel, markControlUnavailable } from './worker-model-rotation.js';
 import { logEvent } from '../bus/event.js';
+import { isReservedAgentDirName } from '../bus/agents.js';
 import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -1569,6 +1570,11 @@ export class AgentManager {
           .map(d => d.name);
 
         for (const name of dirs) {
+          // Reserved infra dirs (_shared = fleet avatar assets, mirrors
+          // state/_shared) are not agents. Without this skip, the missing
+          // config.json defaults to {} → enabled, and the daemon boots a
+          // phantom CTX_AGENT_NAME=_shared session (2026-07-02 fleet reboot).
+          if (isReservedAgentDirName(name)) continue;
           const dir = join(agentsBase, name);
           const config = this.loadAgentConfig(dir);
           agents.push({ name, dir, org, config });

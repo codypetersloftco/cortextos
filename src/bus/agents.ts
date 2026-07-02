@@ -12,6 +12,19 @@ import { validateAgentName } from '../utils/validate.js';
  * inbox/chief/ created by the very bugs we are fixing) would otherwise grandfather
  * the dead name in forever. task_1782943545090 / task_1782937946305.
  */
+/**
+ * Underscore-prefixed dirs under orgs/<org>/agents/ are RESERVED for shared
+ * infra — e.g. `_shared/` holds the fleet's Telegram avatars — mirroring the
+ * state/_shared convention. They are never agents: the daemon must not boot
+ * them (2026-07-02: a fleet reboot spawned a phantom CTX_AGENT_NAME=_shared
+ * session because discoverAgents had no filter and the missing config.json
+ * defaulted to enabled), the roster must not list them, and the bus must not
+ * deliver to them.
+ */
+export function isReservedAgentDirName(name: string): boolean {
+  return name.startsWith('_');
+}
+
 export const RECIPIENT_ALIASES: Record<string, string> = {
   // Retired agent pseudonyms (Cody governance 2026-07-01).
   norma: 'dbanalyst',
@@ -55,6 +68,15 @@ export const RECIPIENT_ALIASES: Record<string, string> = {
 export function assertDeliverableRecipient(ctxRoot: string, org: string | undefined, name: string): string {
   const normalized = name.toLowerCase();
   validateAgentName(normalized);
+
+  // Reserved infra dirs (_shared etc) pass the format check and may even have an
+  // orphan inbox dir on disk (the 2026-07-02 phantom boot created inbox/_shared) —
+  // reject them before the existence test can grandfather them in.
+  if (isReservedAgentDirName(normalized)) {
+    throw new Error(
+      `'${name}' is a reserved shared-assets directory, not an agent. Message not delivered.`,
+    );
+  }
 
   const suggestion = RECIPIENT_ALIASES[normalized];
   if (suggestion) {
@@ -148,6 +170,7 @@ export function listAgents(ctxRoot: string, org?: string): AgentInfo[] {
 
       for (const agentName of agentDirs) {
         if (!/^[a-z0-9_-]+$/.test(agentName)) continue;
+        if (isReservedAgentDirName(agentName)) continue; // _shared etc — infra, not agents
         if (seen.has(agentName)) continue;
 
         seen.add(agentName);
@@ -168,6 +191,7 @@ export function listAgents(ctxRoot: string, org?: string): AgentInfo[] {
   // or never existed). These are surfaced so users can clean them up.
   for (const [name, cfg] of Object.entries(enabledAgents)) {
     if (!/^[a-z0-9_-]+$/.test(name)) continue;
+    if (isReservedAgentDirName(name)) continue; // _shared etc — infra, not agents
     if (seen.has(name)) continue;
     const agentOrg = cfg.org || '';
     if (org && agentOrg !== org) continue;

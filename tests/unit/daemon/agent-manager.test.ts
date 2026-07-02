@@ -82,6 +82,22 @@ describe('AgentManager.discoverAndStart - BUG-028 fix', () => {
     expect(startSpy).toHaveBeenCalledWith('bob', expect.any(String), expect.any(Object), 'acme');
   });
 
+  // 2026-07-02 phantom `_shared` boot: orgs/<org>/agents/_shared holds shared
+  // fleet assets (Telegram avatars), not an agent. discoverAgents() picked it up
+  // (missing config.json → {} → not disabled) and the daemon booted a session
+  // with CTX_AGENT_NAME=_shared. Underscore-prefixed dirs are reserved infra.
+  it('never starts an underscore-prefixed reserved dir (_shared) as an agent', async () => {
+    mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', '_shared', 'avatars'), { recursive: true });
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const startSpy = vi.spyOn(am, 'startAgent').mockResolvedValue();
+
+    await am.discoverAndStart();
+
+    const namesStarted = startSpy.mock.calls.map(call => call[0]).sort();
+    expect(namesStarted).toEqual(['alice', 'bob']);
+  });
+
   it('starts all discovered agents when enabled-agents.json is missing', async () => {
     // No enabled-agents.json on disk — daemon defaults to enabled-on-discovery
     const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');

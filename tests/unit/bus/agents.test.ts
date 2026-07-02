@@ -155,6 +155,34 @@ describe('Agent Discovery', () => {
       expect(agents.map(a => a.name).sort()).toEqual(['alice', 'bob']);
     });
 
+    // 2026-07-02 phantom `_shared` boot: orgs/<org>/agents/_shared holds shared
+    // fleet assets (Telegram avatars), not an agent. Underscore-prefixed dirs are
+    // reserved infra (mirroring state/_shared) and must never appear on the roster.
+    it('excludes underscore-prefixed reserved dirs (_shared) from the dir scan', () => {
+      const frameworkRoot = join(testDir, 'framework');
+      process.env.CTX_FRAMEWORK_ROOT = frameworkRoot;
+      mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice'), { recursive: true });
+      mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', '_shared', 'avatars'), { recursive: true });
+
+      const agents = listAgents(ctxRoot);
+      expect(agents.map(a => a.name)).toEqual(['alice']);
+    });
+
+    it('excludes underscore-prefixed names from the enabled-agents.json merge', () => {
+      const configDir = join(ctxRoot, 'config');
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(
+        join(configDir, 'enabled-agents.json'),
+        JSON.stringify({
+          alice: { org: 'acme', enabled: true },
+          _shared: { org: 'acme', enabled: true },
+        }),
+      );
+
+      const agents = listAgents(ctxRoot);
+      expect(agents.map(a => a.name)).toEqual(['alice']);
+    });
+
     it('respects enabled: false from enabled-agents.json for agents found in dir scan', () => {
       // Set up: dir for alice + entry in enabled-agents.json saying enabled: false.
       // listAgents should return alice with enabled: false (not skip her entirely).
@@ -291,6 +319,13 @@ describe('Agent Discovery', () => {
       // to a hardcoded 'chief'/'orchestrator' with no consumer here.
       expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'chief')).toThrow(/not a deliverable recipient.*boss/);
       expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'orchestrator')).toThrow(/not a deliverable recipient.*boss/);
+    });
+
+    it('rejects a reserved shared-assets name (_shared) EVEN IF its inbox dir exists', () => {
+      // The live ctxRoot really has inbox/_shared (created by the phantom boot) —
+      // dir-existence must NOT grandfather a reserved infra dir in as a recipient.
+      mkdirSync(join(ctxRoot, 'inbox', '_shared'), { recursive: true });
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, '_shared')).toThrow(/reserved/);
     });
 
     it('rejects an alias EVEN IF an orphan inbox dir exists (grandfather guard)', () => {
