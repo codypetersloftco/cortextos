@@ -3,7 +3,7 @@ import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
-import { assertDeliverableRecipient, notifyAgent } from '../bus/agents.js';
+import { assertDeliverableRecipient, notifyAgent, isReservedAgentDirName } from '../bus/agents.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
@@ -1529,6 +1529,7 @@ busCommand
       try {
         const data = JSON.parse(readFileSync(enabledFile, 'utf-8'));
         for (const [name, cfg] of Object.entries(data as Record<string, any>)) {
+          if (isReservedAgentDirName(name)) continue; // _shared etc — infra, not agents
           agentMap[name] = { org: cfg.org ?? '', enabled: cfg.enabled !== false };
         }
       } catch { /* skip corrupt */ }
@@ -1541,6 +1542,7 @@ busCommand
         const agentsDir = join(orgsDir, org, 'agents');
         if (!existsSync(agentsDir)) continue;
         for (const name of readdirSync(agentsDir)) {
+          if (isReservedAgentDirName(name)) continue; // _shared etc — infra, not agents
           if (!agentMap[name]) agentMap[name] = { org, enabled: true };
         }
       }
