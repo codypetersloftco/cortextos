@@ -113,6 +113,18 @@ export class AgentPTY {
 
     // Source agent .env file (overrides org secrets.env for same key names).
     // Contains agent-specific secrets: BOT_TOKEN, CHAT_ID, CLAUDE_CODE_OAUTH_TOKEN.
+    //
+    // Ephemeral workers (spawn-worker) still need this file loaded — it's the
+    // ONLY source of CLAUDE_CODE_OAUTH_TOKEN (not in getBaseEnv's allowlist,
+    // not in org secrets.env), so skipping the load entirely would break a
+    // worker's ability to authenticate at all. Instead, strip BOT_TOKEN/CHAT_ID
+    // specifically for ephemeral workers below — WorkerProcess is documented as
+    // having "No Telegram integration" by design, but this .env load was giving
+    // every worker's child processes (including the SessionEnd crash-alert
+    // hook) live Telegram credentials pointed at the owning agent's chat.
+    // Combined with the marker-collision bug (see worker-process.ts markerPath),
+    // this caused an ephemeral worker's benign exit to page the human owner's
+    // Telegram directly. Root-caused + fixed 2026-07-02.
     const agentEnvFile = join(this.env.agentDir, '.env');
     if (existsSync(agentEnvFile)) {
       const content = readFileSync(agentEnvFile, 'utf-8');
@@ -120,14 +132,18 @@ export class AgentPTY {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         const eqIdx = trimmed.indexOf('=');
-        if (eqIdx > 0) {
-          ptyEnv[trimmed.slice(0, eqIdx).trim()] = trimmed.slice(eqIdx + 1).trim();
+        if (eqIdx <= 0) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        if (this.isEphemeralWorker && (key === 'BOT_TOKEN' || key === 'CHAT_ID')) {
+          continue; // never give a worker's env real Telegram credentials
         }
+        ptyEnv[key] = trimmed.slice(eqIdx + 1).trim();
       }
     }
 
     // Add convenience CTX_* aliases used throughout agent templates.
-    // CTX_TELEGRAM_CHAT_ID: alias for CHAT_ID from the agent's .env
+    // CTX_TELEGRAM_CHAT_ID: alias for CHAT_ID from the agent's .env. Not set for
+    // ephemeral workers — CHAT_ID itself was stripped above.
     if (ptyEnv['CHAT_ID']) {
       ptyEnv['CTX_TELEGRAM_CHAT_ID'] = ptyEnv['CHAT_ID'];
     }

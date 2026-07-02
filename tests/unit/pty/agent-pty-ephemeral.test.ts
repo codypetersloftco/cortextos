@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { AgentPTY } from '../../../src/pty/agent-pty.js';
 
 /**
@@ -114,6 +117,63 @@ describe('AgentPTY — ephemeral-worker headless gate', () => {
     expect(args).toContain('--continue');
     expect(args).toContain('--print');
     expect(args[args.length - 1]).toBe('resume the task');
+  });
+});
+
+/**
+ * Root-cause coverage for the Telegram crash-alert leak (2026-07-02): an
+ * ephemeral worker's env must NOT carry BOT_TOKEN/CHAT_ID from the owning
+ * agent's .env, or a misclassified SessionEnd hook can page the human owner's
+ * real Telegram bot directly. CLAUDE_CODE_OAUTH_TOKEN must still flow through —
+ * it's the ONLY source of that credential (not in getBaseEnv's allowlist, not
+ * in org secrets.env), so blanket-skipping the whole .env load (an earlier fix
+ * attempt considered this) would break a worker's ability to authenticate at
+ * all. Persistent (non-worker) agents must keep BOT_TOKEN/CHAT_ID unchanged —
+ * that's how they actually message their own owner.
+ */
+describe('AgentPTY — ephemeral-worker Telegram-secret strip', () => {
+  let agentDir: string;
+
+  beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), 'agent-pty-secrets-'));
+    writeFileSync(
+      join(agentDir, '.env'),
+      'BOT_TOKEN=real-telegram-bot-token\nCHAT_ID=123456789\nCLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-real-token\n',
+      'utf-8',
+    );
+  });
+
+  afterEach(() => {
+    rmSync(agentDir, { recursive: true, force: true });
+  });
+
+  it('strips BOT_TOKEN/CHAT_ID/CTX_TELEGRAM_CHAT_ID for an ephemeral worker, but keeps CLAUDE_CODE_OAUTH_TOKEN', async () => {
+    vi.useFakeTimers();
+    const { fn, calls } = fakeSpawnCapture();
+    const workerEnv = { ...env, agentDir };
+    const pty = new AgentPTY(workerEnv as never, {}, undefined, undefined, true);
+    (pty as unknown as { spawnFn: unknown }).spawnFn = fn;
+    await pty.spawn('fresh', 'do the task');
+    const spawnedEnv = calls[0].opts.env ?? {};
+    expect(spawnedEnv.BOT_TOKEN).toBeUndefined();
+    expect(spawnedEnv.CHAT_ID).toBeUndefined();
+    expect(spawnedEnv.CTX_TELEGRAM_CHAT_ID).toBeUndefined();
+    expect(spawnedEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat-real-token');
+    expect(spawnedEnv.CTX_EPHEMERAL_WORKER).toBe('1');
+  });
+
+  it('keeps BOT_TOKEN/CHAT_ID/CTX_TELEGRAM_CHAT_ID for a normal persistent agent', async () => {
+    vi.useFakeTimers();
+    const { fn, calls } = fakeSpawnCapture();
+    const agentEnv = { ...env, agentDir };
+    const pty = new AgentPTY(agentEnv as never, {}, undefined, undefined, false);
+    (pty as unknown as { spawnFn: unknown }).spawnFn = fn;
+    await pty.spawn('fresh', 'do the task');
+    const spawnedEnv = calls[0].opts.env ?? {};
+    expect(spawnedEnv.BOT_TOKEN).toBe('real-telegram-bot-token');
+    expect(spawnedEnv.CHAT_ID).toBe('123456789');
+    expect(spawnedEnv.CTX_TELEGRAM_CHAT_ID).toBe('123456789');
+    expect(spawnedEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat-real-token');
   });
 });
 
