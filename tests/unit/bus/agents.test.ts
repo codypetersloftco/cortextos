@@ -278,5 +278,40 @@ describe('Agent Discovery', () => {
       expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'norma')).toThrow(/not a deliverable recipient/);
       expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'chief')).toThrow(/not a deliverable recipient/);
     });
+
+    // Prism blind-gate finding #1 (bus-roster-validation fix-loop, 2026-07-01/02):
+    // validateAgentName + lowercase-normalize must run FIRST, before the alias
+    // check and before existsSync ever touches the filesystem.
+    describe('prism finding #1: format-validate + lowercase-normalize before existsSync', () => {
+      it('rejects a path-traversal name instead of falsely passing via existsSync', () => {
+        // Bug: join(ctxRoot, 'inbox', '../state') resolves to ctxRoot/state, which
+        // exists (created by resolvePaths/notifyAgent elsewhere), so the OLD
+        // existsSync-only check would have passed it. The format check must
+        // reject the raw string before any join()/existsSync runs.
+        mkdirSync(join(ctxRoot, 'state'), { recursive: true });
+        expect(() => assertDeliverableRecipient(ctxRoot, undefined, '../state')).toThrow(/Invalid agent name/);
+      });
+
+      it('accepts a known agent typed in a different case, normalized to canonical lowercase', () => {
+        enableAgent('boss');
+        expect(assertDeliverableRecipient(ctxRoot, undefined, 'Boss')).toBe('boss');
+        expect(assertDeliverableRecipient(ctxRoot, undefined, 'BOSS')).toBe('boss');
+      });
+
+      it('returns the normalized (already-lowercase) name for a plain valid recipient', () => {
+        enableAgent('dbanalyst');
+        expect(assertDeliverableRecipient(ctxRoot, undefined, 'dbanalyst')).toBe('dbanalyst');
+      });
+
+      it('rejects a retired-pseudonym alias EVEN when typed in a different case (alias-case)', () => {
+        // Case-bypass: on a case-insensitive filesystem, 'Norma' skips the
+        // case-sensitive RECIPIENT_ALIASES lookup and listAgents match, then
+        // existsSync(inbox/Norma) can resolve to the same dir as inbox/norma —
+        // grandfathering the retired name back in via capitalization alone.
+        mkdirSync(join(ctxRoot, 'inbox', 'norma'), { recursive: true });
+        expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'Norma')).toThrow(/not a deliverable recipient.*dbanalyst/);
+        expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'NORMA')).toThrow(/not a deliverable recipient.*dbanalyst/);
+      });
+    });
   });
 });

@@ -120,16 +120,19 @@ busCommand
     // recipient wrote to an unwatched inbox/<name>/ dir that nobody drained (the
     // boss->norma incident). Now an unknown/retired name fails loudly with a
     // self-correcting suggestion; workers/prestage (inbox-dir present) still pass.
+    // Use the returned normalized name downstream so a differently-cased but
+    // valid recipient (e.g. 'Boss') lands on the one canonical inbox dir.
+    let recipient: string;
     try {
-      assertDeliverableRecipient(paths.ctxRoot, env.org, to);
+      recipient = assertDeliverableRecipient(paths.ctxRoot, env.org, to);
     } catch (err) {
       console.error(String(err instanceof Error ? err.message : err));
       process.exit(1);
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    const msgId = sendMessage(paths, env.agentName, recipient, priority as Priority, text, effectiveReplyTo);
     try {
-      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
+      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to: recipient, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
     } catch { /* non-fatal */ }
     console.log(msgId);
   });
@@ -205,12 +208,15 @@ busCommand
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     // Owner-on-create forward-guard (task_1782873111596): reject a task assigned to
-    // an unknown/retired agent up front so it never lands on the board orphaned
-    // (nobody drains it, dashboards scanning enabled agents miss it). A missing
-    // --assignee defaults to the caller (always valid) and is not checked here.
-    if (opts.assignee) {
+    // an unknown/retired agent up front — BEFORE createTask ever mutates disk — so
+    // it never lands on the board orphaned (nobody drains it, dashboards scanning
+    // enabled agents miss it). A missing --assignee defaults to the caller (always
+    // valid) and is not checked here. Reassign to the normalized name so a
+    // differently-cased but valid assignee (e.g. 'Boss') gets one canonical inbox.
+    let assignee = opts.assignee;
+    if (assignee) {
       try {
-        assertDeliverableRecipient(paths.ctxRoot, env.org, opts.assignee);
+        assignee = assertDeliverableRecipient(paths.ctxRoot, env.org, assignee);
       } catch (err) {
         console.error(String(err instanceof Error ? err.message : err));
         process.exit(1);
@@ -219,7 +225,7 @@ busCommand
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
-      assignee: opts.assignee,
+      assignee,
       priority: opts.priority as Priority,
       project: opts.project,
       needsApproval: opts.needsApproval ?? false,
@@ -228,10 +234,10 @@ busCommand
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)
-    if (opts.assignee && opts.assignee !== env.agentName) {
-      const assigneePaths = resolvePaths(opts.assignee, env.instanceId, env.org);
+    if (assignee && assignee !== env.agentName) {
+      const assigneePaths = resolvePaths(assignee, env.instanceId, env.org);
       const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
-      sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
+      sendMessage(assigneePaths, env.agentName, assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
     }
   });
@@ -251,10 +257,13 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     // Reassignment guard (task_1782873111596): a new --assignee must be a known
-    // recipient, so re-routing a task can't re-orphan it to an unknown/retired name.
-    if (opts.assignee) {
+    // recipient, so re-routing a task can't re-orphan it to an unknown/retired
+    // name — validated BEFORE updateTask mutates disk. Use the normalized name so
+    // a differently-cased but valid assignee (e.g. 'Boss') gets one canonical inbox.
+    let assignee = opts.assignee;
+    if (assignee) {
       try {
-        assertDeliverableRecipient(paths.ctxRoot, env.org, opts.assignee);
+        assignee = assertDeliverableRecipient(paths.ctxRoot, env.org, assignee);
       } catch (err) {
         console.error(String(err instanceof Error ? err.message : err));
         process.exit(1);
@@ -272,8 +281,8 @@ busCommand
       }
     }
 
-    updateTask(paths, id, status as TaskStatus, opts.assignee);
-    console.log(`Updated ${id} -> ${status}${opts.assignee ? ` (assignee: ${opts.assignee})` : ''}`);
+    updateTask(paths, id, status as TaskStatus, assignee);
+    console.log(`Updated ${id} -> ${status}${assignee ? ` (assignee: ${assignee})` : ''}`);
   });
 
 busCommand
@@ -1655,10 +1664,21 @@ busCommand
     const { join } = require('path');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
+
+    // Roster-validate BEFORE any write (bus-roster-validation fix-loop finding #4):
+    // this was the one remaining bypass — it wrote a phantom .urgent-signal +
+    // state dir for a typo/retired-pseudonym target unconditionally, same class
+    // of silent dead-letter as the send-message bug the rest of this fix targets.
+    let target: string;
+    try {
+      target = assertDeliverableRecipient(paths.ctxRoot, env.org, targetAgent);
+    } catch (err) {
+      console.error(String(err instanceof Error ? err.message : err));
+      process.exit(1);
+    }
 
     // Write urgent signal file that fast-checker checks on every poll
-    const signalDir = join(ctxRoot, 'state', targetAgent);
+    const signalDir = join(paths.ctxRoot, 'state', target);
     mkdirSync(signalDir, { recursive: true });
     const signal = {
       from: env.agentName,
@@ -1669,10 +1689,10 @@ busCommand
 
     // Also send via normal message bus for persistence
     try {
-      sendMessage(paths, env.agentName, targetAgent, 'urgent', message);
+      sendMessage(paths, env.agentName, target, 'urgent', message);
     } catch { /* signal already written */ }
 
-    console.log(`Signal sent to ${targetAgent}`);
+    console.log(`Signal sent to ${target}`);
   });
 
 busCommand

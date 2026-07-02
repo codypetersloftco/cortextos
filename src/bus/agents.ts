@@ -3,6 +3,7 @@ import { join } from 'path';
 import type { AgentInfo, AgentConfig, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { sendMessage } from './message.js';
+import { validateAgentName } from '../utils/validate.js';
 
 /**
  * Known non-recipient names → the registry name they should resolve to. A send to
@@ -27,25 +28,44 @@ export const RECIPIENT_ALIASES: Record<string, string> = {
  * Validate that `name` is a deliverable message/task recipient before we write to
  * its inbox (roster-validation, task_1782943545090). Throws with a self-correcting
  * suggestion on an unknown or retired name so a typo/pseudonym fails loudly instead
- * of silently dead-lettering to an unwatched inbox/<name>/ dir.
+ * of silently dead-lettering to an unwatched inbox/<name>/ dir. Returns the
+ * lowercase-normalized name callers should actually use downstream (send-message,
+ * createTask/updateTask's assigned_to, notify-agent) so a differently-cased but
+ * valid input still lands on the ONE canonical inbox dir.
  *
  * Legit recipients: known agents (listAgents — dir scan + enabled-agents.json) OR
  * any name that already has an inbox dir. Ephemeral workers create their inbox at
  * spawn (worker-process.ts) and enabled agents at enable time, so inbox-existence
  * covers workers/prestage/system without enumerating every pattern — provided the
  * deploy paired an orphan-inbox hygiene sweep so the signal stays honest.
+ *
+ * Format-validate + lowercase-normalize FIRST, before the alias/existence checks
+ * below (prism blind-gate finding #1). Two real bugs this closes:
+ *   1. Path traversal: with no charset check ahead of it, `existsSync(join(ctxRoot,
+ *      'inbox', name))` for name='../state' resolves to ctxRoot/state (which
+ *      exists) and falsely passes. validateAgentName's charset (no '.', '/')
+ *      rejects it outright before any join()/existsSync runs.
+ *   2. Case-bypass of the alias deny-list: on a case-insensitive filesystem
+ *      (Windows/macOS), 'Norma' skips the case-sensitive RECIPIENT_ALIASES
+ *      lookup and listAgents match, then existsSync(inbox/Norma) resolves to the
+ *      SAME directory as inbox/norma — grandfathering a retired pseudonym back in
+ *      via a capitalization variant. Normalizing to lowercase before every check
+ *      closes the gap.
  */
-export function assertDeliverableRecipient(ctxRoot: string, org: string | undefined, name: string): void {
-  const suggestion = RECIPIENT_ALIASES[name];
+export function assertDeliverableRecipient(ctxRoot: string, org: string | undefined, name: string): string {
+  const normalized = name.toLowerCase();
+  validateAgentName(normalized);
+
+  const suggestion = RECIPIENT_ALIASES[normalized];
   if (suggestion) {
     throw new Error(
       `'${name}' is not a deliverable recipient — did you mean '${suggestion}'? ` +
       `(cortextos bus list-agents). Message not delivered.`,
     );
   }
-  const known = listAgents(ctxRoot, org).some((a) => a.name === name);
-  if (known) return;
-  if (existsSync(join(ctxRoot, 'inbox', name))) return;
+  const known = listAgents(ctxRoot, org).some((a) => a.name === normalized);
+  if (known) return normalized;
+  if (existsSync(join(ctxRoot, 'inbox', normalized))) return normalized;
   throw new Error(
     `'${name}' is not a known agent or worker — check the roster with 'cortextos bus list-agents'. ` +
     `Message not delivered (was it a typo or a retired name?).`,
