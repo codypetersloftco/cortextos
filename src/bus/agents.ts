@@ -3,6 +3,74 @@ import { join } from 'path';
 import type { AgentInfo, AgentConfig, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { sendMessage } from './message.js';
+import { validateAgentName } from '../utils/validate.js';
+
+/**
+ * Known non-recipient names → the registry name they should resolve to. A send to
+ * one of these ALWAYS rejects with a suggestion — this overrides the inbox-dir
+ * existence test below, since orphaned dead-letter dirs (e.g. an inbox/norma/ or
+ * inbox/chief/ created by the very bugs we are fixing) would otherwise grandfather
+ * the dead name in forever. task_1782943545090 / task_1782937946305.
+ */
+export const RECIPIENT_ALIASES: Record<string, string> = {
+  // Retired agent pseudonyms (Cody governance 2026-07-01).
+  norma: 'dbanalyst',
+  forge: 'engineer',
+  sentinel: 'analyst',
+  // Template-default orchestrator names with no consumer in this org — a hardcoded
+  // 'chief'/'orchestrator' recipient silently dead-lettered crash alerts + worker
+  // completion reports. Suggest the real org orchestrator.
+  orchestrator: 'boss',
+  chief: 'boss',
+};
+
+/**
+ * Validate that `name` is a deliverable message/task recipient before we write to
+ * its inbox (roster-validation, task_1782943545090). Throws with a self-correcting
+ * suggestion on an unknown or retired name so a typo/pseudonym fails loudly instead
+ * of silently dead-lettering to an unwatched inbox/<name>/ dir. Returns the
+ * lowercase-normalized name callers should actually use downstream (send-message,
+ * createTask/updateTask's assigned_to, notify-agent) so a differently-cased but
+ * valid input still lands on the ONE canonical inbox dir.
+ *
+ * Legit recipients: known agents (listAgents — dir scan + enabled-agents.json) OR
+ * any name that already has an inbox dir. Ephemeral workers create their inbox at
+ * spawn (worker-process.ts) and enabled agents at enable time, so inbox-existence
+ * covers workers/prestage/system without enumerating every pattern — provided the
+ * deploy paired an orphan-inbox hygiene sweep so the signal stays honest.
+ *
+ * Format-validate + lowercase-normalize FIRST, before the alias/existence checks
+ * below (prism blind-gate finding #1). Two real bugs this closes:
+ *   1. Path traversal: with no charset check ahead of it, `existsSync(join(ctxRoot,
+ *      'inbox', name))` for name='../state' resolves to ctxRoot/state (which
+ *      exists) and falsely passes. validateAgentName's charset (no '.', '/')
+ *      rejects it outright before any join()/existsSync runs.
+ *   2. Case-bypass of the alias deny-list: on a case-insensitive filesystem
+ *      (Windows/macOS), 'Norma' skips the case-sensitive RECIPIENT_ALIASES
+ *      lookup and listAgents match, then existsSync(inbox/Norma) resolves to the
+ *      SAME directory as inbox/norma — grandfathering a retired pseudonym back in
+ *      via a capitalization variant. Normalizing to lowercase before every check
+ *      closes the gap.
+ */
+export function assertDeliverableRecipient(ctxRoot: string, org: string | undefined, name: string): string {
+  const normalized = name.toLowerCase();
+  validateAgentName(normalized);
+
+  const suggestion = RECIPIENT_ALIASES[normalized];
+  if (suggestion) {
+    throw new Error(
+      `'${name}' is not a deliverable recipient — did you mean '${suggestion}'? ` +
+      `(cortextos bus list-agents). Message not delivered.`,
+    );
+  }
+  const known = listAgents(ctxRoot, org).some((a) => a.name === normalized);
+  if (known) return normalized;
+  if (existsSync(join(ctxRoot, 'inbox', normalized))) return normalized;
+  throw new Error(
+    `'${name}' is not a known agent or worker — check the roster with 'cortextos bus list-agents'. ` +
+    `Message not delivered (was it a typo or a retired name?).`,
+  );
+}
 
 /**
  * List all agents in the system.
@@ -235,6 +303,17 @@ function buildAgentInfo(
  * Send an urgent notification to an agent.
  * Writes .urgent-signal file and sends a bus message.
  * Mirrors bash notify-agent.sh behavior.
+ *
+ * Roster-validates BEFORE any write (prism re-gate #2, 2026-07-02). This is
+ * the ONE shared implementation both notify-agent CLI surfaces call — the
+ * top-level `cortextos notify-agent` command (src/cli/notify-agent.ts) and
+ * `cortextos bus notify-agent` (src/cli/bus.ts) — so validating here covers
+ * both by construction. The prior fix guarded the `bus notify-agent`
+ * subcommand with its OWN inline copy of this logic, missing the separate
+ * top-level command entirely; that surface called this helper directly,
+ * unguarded, and could recreate a retired/orphan target's state dir right
+ * after an inbox-hygiene sweep archived it. Returns the normalized target
+ * name so callers report the canonical recipient.
  */
 export function notifyAgent(
   paths: BusPaths,
@@ -242,9 +321,12 @@ export function notifyAgent(
   targetAgent: string,
   message: string,
   ctxRoot: string,
-): void {
+  org?: string,
+): string {
+  const target = assertDeliverableRecipient(ctxRoot, org, targetAgent);
+
   // Write signal file to state dir
-  const signalDir = join(ctxRoot, 'state', targetAgent);
+  const signalDir = join(ctxRoot, 'state', target);
   ensureDir(signalDir);
 
   const signal = {
@@ -257,8 +339,10 @@ export function notifyAgent(
 
   // Also send via normal message bus for persistence
   try {
-    sendMessage(paths, from, targetAgent, 'urgent', message);
+    sendMessage(paths, from, target, 'urgent', message);
   } catch {
     // Ignore bus send failures - signal file is the primary mechanism
   }
+
+  return target;
 }

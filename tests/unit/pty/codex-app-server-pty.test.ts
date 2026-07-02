@@ -921,7 +921,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
 
     expect(atomicWriteSyncMock).toHaveBeenCalledTimes(1);
     const [path] = atomicWriteSyncMock.mock.calls[0];
-    expect(path).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
+    expect(String(path).replace(/\\/g, '/')).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
     const payload = lastWrittenPayload()!;
     expect(payload.used_percentage).toBeCloseTo(35, 5);
     expect(payload.context_window_size).toBe(200000);
@@ -1064,7 +1064,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
 
     expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
     const [path, line] = fsMocks.appendFileSync.mock.calls[0] as [string, string];
-    expect(path).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
+    expect(String(path).replace(/\\/g, '/')).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
     expect(line.endsWith('\n')).toBe(true);
 
     const entry = lastAppendedEntry()!;

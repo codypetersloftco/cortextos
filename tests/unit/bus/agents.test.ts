@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { listAgents, notifyAgent } from '../../../src/bus/agents';
+import { listAgents, notifyAgent, assertDeliverableRecipient } from '../../../src/bus/agents';
 import type { BusPaths } from '../../../src/types';
 
 describe('Agent Discovery', () => {
@@ -195,6 +195,7 @@ describe('Agent Discovery', () => {
     });
 
     it('creates signal file and bus message', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'target'), { recursive: true });
       notifyAgent(paths, 'sender', 'target', 'Wake up!', ctxRoot);
 
       // Check signal file exists
@@ -209,6 +210,7 @@ describe('Agent Discovery', () => {
     });
 
     it('signal file has correct JSON format', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'paul'), { recursive: true });
       notifyAgent(paths, 'boris', 'paul', 'New task available', ctxRoot);
 
       const signalFile = join(ctxRoot, 'state', 'paul', '.urgent-signal');
@@ -222,12 +224,117 @@ describe('Agent Discovery', () => {
     });
 
     it('creates state directory if it does not exist', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'newagent'), { recursive: true });
       const stateDir = join(ctxRoot, 'state', 'newagent');
       expect(existsSync(stateDir)).toBe(false);
 
       notifyAgent(paths, 'sender', 'newagent', 'Hello', ctxRoot);
 
       expect(existsSync(stateDir)).toBe(true);
+    });
+
+    // Prism re-gate #2 (2026-07-02): the shared notifyAgent() helper is now the
+    // ONE place both notify-agent CLI surfaces validate through — a live repro
+    // against the pre-fix SHA showed `cortextos notify-agent norma ...` exiting 0
+    // and recreating a retired-pseudonym state dir right after an inbox sweep.
+    it('rejects an unknown/retired target BEFORE writing any signal file or state dir', () => {
+      const stateDir = join(ctxRoot, 'state', 'norma');
+      expect(() => notifyAgent(paths, 'sender', 'norma', 'hello', ctxRoot)).toThrow(/not a deliverable recipient.*dbanalyst/);
+      expect(existsSync(stateDir)).toBe(false);
+    });
+
+    it('rejects a path-traversal target before any write', () => {
+      expect(() => notifyAgent(paths, 'sender', '../state', 'hello', ctxRoot)).toThrow(/Invalid agent name/);
+    });
+
+    it('returns the normalized (lowercase) target name', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'target'), { recursive: true });
+      expect(notifyAgent(paths, 'sender', 'Target', 'Wake up!', ctxRoot)).toBe('target');
+      expect(existsSync(join(ctxRoot, 'state', 'target', '.urgent-signal'))).toBe(true);
+    });
+  });
+
+  // task_1782943545090: send-message / task-assign roster validation — a typo or
+  // retired pseudonym must fail loudly, not silently dead-letter to an unwatched inbox.
+  describe('assertDeliverableRecipient', () => {
+    function enableAgent(name: string, org = 'acme') {
+      const configDir = join(ctxRoot, 'config');
+      mkdirSync(configDir, { recursive: true });
+      const file = join(configDir, 'enabled-agents.json');
+      const cur = existsSync(file) ? JSON.parse(readFileSync(file, 'utf-8')) : {};
+      cur[name] = { org, enabled: true };
+      writeFileSync(file, JSON.stringify(cur));
+    }
+
+    it('accepts a known enabled agent', () => {
+      enableAgent('dbanalyst');
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'dbanalyst')).not.toThrow();
+    });
+
+    it('accepts a name that has an existing inbox dir (worker/prestage/system)', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'worker-abc123'), { recursive: true });
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'worker-abc123')).not.toThrow();
+    });
+
+    it('rejects an unknown name with a roster hint', () => {
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'nobody')).toThrow(/not a known agent or worker/);
+    });
+
+    it('rejects a retired pseudonym alias and suggests the registry name', () => {
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'norma')).toThrow(/not a deliverable recipient.*dbanalyst/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'forge')).toThrow(/not a deliverable recipient.*engineer/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'sentinel')).toThrow(/not a deliverable recipient.*analyst/);
+    });
+
+    it('rejects template-default orchestrator names (chief/orchestrator) and suggests boss', () => {
+      // task_1782937946305: the crash-alert emitter and worker report-back defaulted
+      // to a hardcoded 'chief'/'orchestrator' with no consumer here.
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'chief')).toThrow(/not a deliverable recipient.*boss/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'orchestrator')).toThrow(/not a deliverable recipient.*boss/);
+    });
+
+    it('rejects an alias EVEN IF an orphan inbox dir exists (grandfather guard)', () => {
+      // The exact bug: a prior dead-letter created inbox/norma/ or inbox/chief/.
+      // Dir-existence must NOT grandfather the dead name in — the alias map overrides.
+      mkdirSync(join(ctxRoot, 'inbox', 'norma'), { recursive: true });
+      mkdirSync(join(ctxRoot, 'inbox', 'chief'), { recursive: true });
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'norma')).toThrow(/not a deliverable recipient/);
+      expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'chief')).toThrow(/not a deliverable recipient/);
+    });
+
+    // Prism blind-gate finding #1 (bus-roster-validation fix-loop, 2026-07-01/02):
+    // validateAgentName + lowercase-normalize must run FIRST, before the alias
+    // check and before existsSync ever touches the filesystem.
+    describe('prism finding #1: format-validate + lowercase-normalize before existsSync', () => {
+      it('rejects a path-traversal name instead of falsely passing via existsSync', () => {
+        // Bug: join(ctxRoot, 'inbox', '../state') resolves to ctxRoot/state, which
+        // exists (created by resolvePaths/notifyAgent elsewhere), so the OLD
+        // existsSync-only check would have passed it. The format check must
+        // reject the raw string before any join()/existsSync runs.
+        mkdirSync(join(ctxRoot, 'state'), { recursive: true });
+        expect(() => assertDeliverableRecipient(ctxRoot, undefined, '../state')).toThrow(/Invalid agent name/);
+      });
+
+      it('accepts a known agent typed in a different case, normalized to canonical lowercase', () => {
+        enableAgent('boss');
+        expect(assertDeliverableRecipient(ctxRoot, undefined, 'Boss')).toBe('boss');
+        expect(assertDeliverableRecipient(ctxRoot, undefined, 'BOSS')).toBe('boss');
+      });
+
+      it('returns the normalized (already-lowercase) name for a plain valid recipient', () => {
+        enableAgent('dbanalyst');
+        expect(assertDeliverableRecipient(ctxRoot, undefined, 'dbanalyst')).toBe('dbanalyst');
+      });
+
+      it('rejects a retired-pseudonym alias EVEN when typed in a different case (alias-case)', () => {
+        // Case-bypass: on a case-insensitive filesystem, 'Norma' skips the
+        // case-sensitive RECIPIENT_ALIASES lookup and listAgents match, then
+        // existsSync(inbox/Norma) can resolve to the same dir as inbox/norma —
+        // grandfathering the retired name back in via capitalization alone.
+        mkdirSync(join(ctxRoot, 'inbox', 'norma'), { recursive: true });
+        expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'Norma')).toThrow(/not a deliverable recipient.*dbanalyst/);
+        expect(() => assertDeliverableRecipient(ctxRoot, undefined, 'NORMA')).toThrow(/not a deliverable recipient.*dbanalyst/);
+      });
     });
   });
 });

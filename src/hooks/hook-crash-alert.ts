@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, mk
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
+import { RECIPIENT_ALIASES, listAgents } from '../bus/agents.js';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -103,6 +104,46 @@ export function readMaxCrashesPerDay(agentDir: string | undefined): number | nul
     return typeof cfg.max_crashes_per_day === 'number' ? cfg.max_crashes_per_day : null;
   } catch {
     return null;
+  }
+}
+
+/** Fallback recipient when CTX_ORCHESTRATOR_AGENT can't be resolved to a real agent. */
+const DEFAULT_ORCHESTRATOR = 'boss';
+
+/**
+ * Resolve CTX_ORCHESTRATOR_AGENT to a deliverable recipient name (prism blind-gate
+ * finding #2). The bug: `process.env.CTX_ORCHESTRATOR_AGENT || 'boss'` only catches
+ * unset/empty — a bad value (a retired pseudonym, a template default like 'chief',
+ * or a plain typo) passed straight through as the crash-alert recipient. Once the
+ * roster-validation fix ships, `cortextos bus send-message` HARD-REJECTS such a
+ * name — and because notifyAgents fires it via a fire-and-forget execFile with a
+ * no-op callback, that rejection is invisible: the orchestrator's copy of the
+ * alert silently vanishes instead of merely dead-lettering to an unwatched inbox.
+ *
+ * Resolution order: unset/empty/malformed -> default; else resolve through the
+ * SAME alias map send-message uses (chief/orchestrator -> boss, norma -> dbanalyst,
+ * etc.) so a legacy value still reaches its modern equivalent; then confirm the
+ * (possibly alias-resolved) name is a real known agent via the roster — an
+ * unresolvable value falls back to the default rather than being sent as-is and
+ * hard-rejected downstream.
+ */
+export function resolveOrchestratorRecipient(org: string | undefined): string {
+  const raw = (process.env.CTX_ORCHESTRATOR_AGENT || '').trim().toLowerCase();
+  if (!raw || !/^[a-z0-9_-]+$/.test(raw)) return DEFAULT_ORCHESTRATOR;
+
+  const resolved = RECIPIENT_ALIASES[raw] ?? raw;
+  // Same CTX_ROOT-fallback convention as the rest of this hook file
+  // (hook-context-status.ts, hook-loop-detector.ts, hooks/index.ts).
+  const ctxRoot = process.env.CTX_ROOT || join(homedir(), '.cortextos', 'default');
+  try {
+    const known = listAgents(ctxRoot, org).some((a) => a.name === resolved);
+    return known ? resolved : DEFAULT_ORCHESTRATOR;
+  } catch {
+    // prism re-gate #2 (LOW hardening): fail-safe to the default, not the
+    // unresolved name — if listAgents() ever throws unexpectedly, a bad/typo
+    // value must not reach the roster-validated send-message any more than it
+    // would on the normal "unknown agent" path above.
+    return DEFAULT_ORCHESTRATOR;
   }
 }
 
@@ -471,7 +512,17 @@ async function main(): Promise<void> {
       lastTask,
       crashCount,
       restartAttempted,
-      recipients: ['chief', 'analyst'],
+      // Fix (task_1782937946305): 'chief' is a template-default orchestrator name
+      // with no consumer in this org, so the chief-addressed copy of every crash
+      // alert dead-lettered (only the analyst copy delivered). Resolve to the real
+      // org orchestrator so the alert reaches it; dedupe in case it equals analyst.
+      // Pairs with the roster-validation deploy — that fix would otherwise make the
+      // dead 'chief' recipient hard-reject at the CLI send-message layer. Fix #2
+      // (bus-roster-validation fix-loop): resolve through the alias map + roster
+      // (resolveOrchestratorRecipient) rather than a raw ||'boss' fallback, so an
+      // unset/bad/typo'd CTX_ORCHESTRATOR_AGENT can't itself get hard-rejected by
+      // that same roster-validation and silently drop the orchestrator's copy.
+      recipients: [...new Set([resolveOrchestratorRecipient(process.env.CTX_ORG), 'analyst'])],
     });
   }
 

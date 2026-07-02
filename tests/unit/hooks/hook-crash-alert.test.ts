@@ -8,8 +8,9 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
+import { mkdirSync } from 'fs';
 import { EventEmitter } from 'events';
-import { readMaxCrashesPerDay, notifyAgents, classifyFromMarkers, isEphemeralWorkerExit, consumeEphemeralWorkerMarker, readHookInput } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, resolveOrchestratorRecipient, classifyFromMarkers, isEphemeralWorkerExit, consumeEphemeralWorkerMarker, readHookInput } from '../../../src/hooks/hook-crash-alert';
 import { clearEndMarkers } from '../../../src/bus/heartbeat';
 
 describe('readMaxCrashesPerDay', () => {
@@ -49,6 +50,100 @@ describe('readMaxCrashesPerDay', () => {
   it('returns null when max_crashes_per_day is not a number', () => {
     writeFileSync(join(tmp, 'config.json'), JSON.stringify({ max_crashes_per_day: 'ten' }), 'utf-8');
     expect(readMaxCrashesPerDay(tmp)).toBeNull();
+  });
+});
+
+// Prism blind-gate finding #2 (bus-roster-validation fix-loop, 2026-07-01/02):
+// CTX_ORCHESTRATOR_AGENT must resolve through the alias map + roster, not a raw
+// `|| 'boss'` fallback — else an unset/bad/typo'd value gets hard-rejected by
+// the roster-validated send-message and the orchestrator's crash-alert copy
+// silently vanishes (fire-and-forget execFile swallows the rejection).
+describe('resolveOrchestratorRecipient', () => {
+  let tmp: string;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'crashalert-orch-'));
+    savedEnv.CTX_ROOT = process.env.CTX_ROOT;
+    savedEnv.CTX_ORCHESTRATOR_AGENT = process.env.CTX_ORCHESTRATOR_AGENT;
+    savedEnv.CTX_FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT;
+    savedEnv.CTX_PROJECT_ROOT = process.env.CTX_PROJECT_ROOT;
+
+    process.env.CTX_ROOT = tmp;
+    // Empty framework root (no orgs/ dir) so listAgents relies solely on
+    // enabled-agents.json below — same pattern as bus/agents.test.ts.
+    process.env.CTX_FRAMEWORK_ROOT = join(tmp, 'framework');
+    delete process.env.CTX_PROJECT_ROOT;
+
+    const configDir = join(tmp, 'config');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, 'enabled-agents.json'),
+      JSON.stringify({
+        boss: { org: 'acme', enabled: true },
+        analyst: { org: 'acme', enabled: true },
+        dbanalyst: { org: 'acme', enabled: true },
+      }),
+    );
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+    for (const key of Object.keys(savedEnv)) {
+      const val = savedEnv[key];
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  });
+
+  it('defaults to boss when CTX_ORCHESTRATOR_AGENT is unset', () => {
+    delete process.env.CTX_ORCHESTRATOR_AGENT;
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('defaults to boss when CTX_ORCHESTRATOR_AGENT is empty', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = '';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('passes through a valid known agent (boss)', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'boss';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('passes through a valid known agent (analyst)', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'analyst';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('analyst');
+  });
+
+  it('resolves the template-default "chief" alias to boss', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'chief';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('resolves the template-default "orchestrator" alias to boss', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'orchestrator';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('resolves the retired pseudonym "norma" to its registry name dbanalyst', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'norma';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('dbanalyst');
+  });
+
+  it('falls back to boss for an unresolvable typo/garbage value instead of passing it through', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'totally-unknown-agent';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('falls back to boss for a malformed value (rejects before any roster lookup)', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = '../etc/passwd';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
+  });
+
+  it('is case-insensitive on the input', () => {
+    process.env.CTX_ORCHESTRATOR_AGENT = 'BOSS';
+    expect(resolveOrchestratorRecipient(undefined)).toBe('boss');
   });
 });
 

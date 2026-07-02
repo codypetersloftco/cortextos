@@ -3,6 +3,7 @@ import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
+import { assertDeliverableRecipient, notifyAgent } from '../bus/agents.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
@@ -103,41 +104,37 @@ busCommand
       console.error(`Invalid priority '${priority}'. Must be one of: ${validPriorities.join(', ')}`);
       process.exit(1);
     }
-    // Security (H9): Validate agent name before any filesystem access.
-    try {
-      validateAgentName(to);
-    } catch (err) {
-      console.error(String(err));
-      process.exit(1);
-    }
-
+    // Security (H9): validate + roster-check the agent name before any filesystem
+    // access. This used to be a separate early `validateAgentName(to)` call on the
+    // RAW (non-normalized) input, ahead of resolveEnv/resolvePaths — but neither of
+    // those touch the filesystem, and the raw-case check rejected a valid
+    // differently-cased recipient (e.g. 'Boss') before assertDeliverableRecipient's
+    // own lowercase-normalize ever ran, contradicting the "valid in any case"
+    // behavior create-task/update-task already had (prism re-gate #2 wording nit,
+    // 2026-07-02). assertDeliverableRecipient() below still validates format
+    // strictly (rejecting '../state' etc.) before any fs access — H9's actual
+    // guarantee is unchanged, just no longer duplicated with stricter case rules.
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
-    // Warn if target agent doesn't exist (check project dir)
-    const { existsSync } = require('fs');
-    const { join } = require('path');
-    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const orgsDir = join(projectRoot, 'orgs');
-    let agentExists = false;
-    if (existsSync(orgsDir)) {
-      const { readdirSync } = require('fs');
-      try {
-        for (const org of readdirSync(orgsDir)) {
-          if (existsSync(join(orgsDir, org, 'agents', to))) {
-            agentExists = true;
-            break;
-          }
-        }
-      } catch { /* skip */ }
-    }
-    if (!agentExists) {
-      console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
+    // Roster-validation (task_1782943545090): REJECT — do not silently dead-letter.
+    // Previously this only WARNED and sent anyway, so a typo/retired-pseudonym
+    // recipient wrote to an unwatched inbox/<name>/ dir that nobody drained (the
+    // boss->norma incident). Now an unknown/retired name fails loudly with a
+    // self-correcting suggestion; workers/prestage (inbox-dir present) still pass.
+    // Use the returned normalized name downstream so a differently-cased but
+    // valid recipient (e.g. 'Boss') lands on the one canonical inbox dir.
+    let recipient: string;
+    try {
+      recipient = assertDeliverableRecipient(paths.ctxRoot, env.org, to);
+    } catch (err) {
+      console.error(String(err instanceof Error ? err.message : err));
+      process.exit(1);
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    const msgId = sendMessage(paths, env.agentName, recipient, priority as Priority, text, effectiveReplyTo);
     try {
-      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
+      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to: recipient, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
     } catch { /* non-fatal */ }
     console.log(msgId);
   });
@@ -212,10 +209,25 @@ busCommand
   .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    // Owner-on-create forward-guard (task_1782873111596): reject a task assigned to
+    // an unknown/retired agent up front — BEFORE createTask ever mutates disk — so
+    // it never lands on the board orphaned (nobody drains it, dashboards scanning
+    // enabled agents miss it). A missing --assignee defaults to the caller (always
+    // valid) and is not checked here. Reassign to the normalized name so a
+    // differently-cased but valid assignee (e.g. 'Boss') gets one canonical inbox.
+    let assignee = opts.assignee;
+    if (assignee) {
+      try {
+        assignee = assertDeliverableRecipient(paths.ctxRoot, env.org, assignee);
+      } catch (err) {
+        console.error(String(err instanceof Error ? err.message : err));
+        process.exit(1);
+      }
+    }
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
-      assignee: opts.assignee,
+      assignee,
       priority: opts.priority as Priority,
       project: opts.project,
       needsApproval: opts.needsApproval ?? false,
@@ -224,10 +236,10 @@ busCommand
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)
-    if (opts.assignee && opts.assignee !== env.agentName) {
-      const assigneePaths = resolvePaths(opts.assignee, env.instanceId, env.org);
+    if (assignee && assignee !== env.agentName) {
+      const assigneePaths = resolvePaths(assignee, env.instanceId, env.org);
       const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
-      sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
+      sendMessage(assigneePaths, env.agentName, assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
     }
   });
@@ -236,7 +248,8 @@ busCommand
   .command('update-task')
   .argument('<id>', 'Task ID')
   .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
-  .action((id: string, status: string) => {
+  .option('--assignee <agent>', 'Reassign the task to another agent (roster-validated)')
+  .action((id: string, status: string, opts: { assignee?: string }) => {
     const validStatuses: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
     if (!validStatuses.includes(status as TaskStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: ${validStatuses.join(', ')}`);
@@ -244,6 +257,20 @@ busCommand
     }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+
+    // Reassignment guard (task_1782873111596): a new --assignee must be a known
+    // recipient, so re-routing a task can't re-orphan it to an unknown/retired
+    // name — validated BEFORE updateTask mutates disk. Use the normalized name so
+    // a differently-cased but valid assignee (e.g. 'Boss') gets one canonical inbox.
+    let assignee = opts.assignee;
+    if (assignee) {
+      try {
+        assignee = assertDeliverableRecipient(paths.ctxRoot, env.org, assignee);
+      } catch (err) {
+        console.error(String(err instanceof Error ? err.message : err));
+        process.exit(1);
+      }
+    }
 
     // Guard: block review/completion when deliverables are required but missing.
     // Checks both ready_for_review (approval workflow) and completed (vanilla upstream)
@@ -256,8 +283,8 @@ busCommand
       }
     }
 
-    updateTask(paths, id, status as TaskStatus);
-    console.log(`Updated ${id} -> ${status}`);
+    updateTask(paths, id, status as TaskStatus, assignee);
+    console.log(`Updated ${id} -> ${status}${assignee ? ` (assignee: ${assignee})` : ''}`);
   });
 
 busCommand
@@ -1635,28 +1662,23 @@ busCommand
   .argument('<agent>', 'Target agent name')
   .argument('<message>', 'Urgent message text')
   .action((targetAgent: string, message: string) => {
-    const { mkdirSync, writeFileSync } = require('fs');
-    const { join } = require('path');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
 
-    // Write urgent signal file that fast-checker checks on every poll
-    const signalDir = join(ctxRoot, 'state', targetAgent);
-    mkdirSync(signalDir, { recursive: true });
-    const signal = {
-      from: env.agentName,
-      message,
-      timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-    };
-    writeFileSync(join(signalDir, '.urgent-signal'), JSON.stringify(signal));
-
-    // Also send via normal message bus for persistence
+    // Thin wrapper around the ONE shared implementation (prism re-gate #2,
+    // 2026-07-02): this command used to carry its own inline copy of the
+    // signal-write + roster-validate logic, which is exactly how the separate
+    // top-level `cortextos notify-agent` command (src/cli/notify-agent.ts)
+    // ended up calling the unguarded original notifyAgent() directly and
+    // bypassing validation entirely. Routing both surfaces through
+    // notifyAgent() means the roster check lives in exactly one place.
     try {
-      sendMessage(paths, env.agentName, targetAgent, 'urgent', message);
-    } catch { /* signal already written */ }
-
-    console.log(`Signal sent to ${targetAgent}`);
+      const target = notifyAgent(paths, env.agentName, targetAgent, message, paths.ctxRoot, env.org);
+      console.log(`Signal sent to ${target}`);
+    } catch (err) {
+      console.error(String(err instanceof Error ? err.message : err));
+      process.exit(1);
+    }
   });
 
 busCommand
