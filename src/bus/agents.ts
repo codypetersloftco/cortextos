@@ -303,6 +303,17 @@ function buildAgentInfo(
  * Send an urgent notification to an agent.
  * Writes .urgent-signal file and sends a bus message.
  * Mirrors bash notify-agent.sh behavior.
+ *
+ * Roster-validates BEFORE any write (prism re-gate #2, 2026-07-02). This is
+ * the ONE shared implementation both notify-agent CLI surfaces call — the
+ * top-level `cortextos notify-agent` command (src/cli/notify-agent.ts) and
+ * `cortextos bus notify-agent` (src/cli/bus.ts) — so validating here covers
+ * both by construction. The prior fix guarded the `bus notify-agent`
+ * subcommand with its OWN inline copy of this logic, missing the separate
+ * top-level command entirely; that surface called this helper directly,
+ * unguarded, and could recreate a retired/orphan target's state dir right
+ * after an inbox-hygiene sweep archived it. Returns the normalized target
+ * name so callers report the canonical recipient.
  */
 export function notifyAgent(
   paths: BusPaths,
@@ -310,9 +321,12 @@ export function notifyAgent(
   targetAgent: string,
   message: string,
   ctxRoot: string,
-): void {
+  org?: string,
+): string {
+  const target = assertDeliverableRecipient(ctxRoot, org, targetAgent);
+
   // Write signal file to state dir
-  const signalDir = join(ctxRoot, 'state', targetAgent);
+  const signalDir = join(ctxRoot, 'state', target);
   ensureDir(signalDir);
 
   const signal = {
@@ -325,8 +339,10 @@ export function notifyAgent(
 
   // Also send via normal message bus for persistence
   try {
-    sendMessage(paths, from, targetAgent, 'urgent', message);
+    sendMessage(paths, from, target, 'urgent', message);
   } catch {
     // Ignore bus send failures - signal file is the primary mechanism
   }
+
+  return target;
 }

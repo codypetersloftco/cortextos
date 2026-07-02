@@ -3,7 +3,7 @@ import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
-import { assertDeliverableRecipient } from '../bus/agents.js';
+import { assertDeliverableRecipient, notifyAgent } from '../bus/agents.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
@@ -104,14 +104,16 @@ busCommand
       console.error(`Invalid priority '${priority}'. Must be one of: ${validPriorities.join(', ')}`);
       process.exit(1);
     }
-    // Security (H9): Validate agent name before any filesystem access.
-    try {
-      validateAgentName(to);
-    } catch (err) {
-      console.error(String(err));
-      process.exit(1);
-    }
-
+    // Security (H9): validate + roster-check the agent name before any filesystem
+    // access. This used to be a separate early `validateAgentName(to)` call on the
+    // RAW (non-normalized) input, ahead of resolveEnv/resolvePaths — but neither of
+    // those touch the filesystem, and the raw-case check rejected a valid
+    // differently-cased recipient (e.g. 'Boss') before assertDeliverableRecipient's
+    // own lowercase-normalize ever ran, contradicting the "valid in any case"
+    // behavior create-task/update-task already had (prism re-gate #2 wording nit,
+    // 2026-07-02). assertDeliverableRecipient() below still validates format
+    // strictly (rejecting '../state' etc.) before any fs access — H9's actual
+    // guarantee is unchanged, just no longer duplicated with stricter case rules.
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
@@ -1660,39 +1662,23 @@ busCommand
   .argument('<agent>', 'Target agent name')
   .argument('<message>', 'Urgent message text')
   .action((targetAgent: string, message: string) => {
-    const { mkdirSync, writeFileSync } = require('fs');
-    const { join } = require('path');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
-    // Roster-validate BEFORE any write (bus-roster-validation fix-loop finding #4):
-    // this was the one remaining bypass — it wrote a phantom .urgent-signal +
-    // state dir for a typo/retired-pseudonym target unconditionally, same class
-    // of silent dead-letter as the send-message bug the rest of this fix targets.
-    let target: string;
+    // Thin wrapper around the ONE shared implementation (prism re-gate #2,
+    // 2026-07-02): this command used to carry its own inline copy of the
+    // signal-write + roster-validate logic, which is exactly how the separate
+    // top-level `cortextos notify-agent` command (src/cli/notify-agent.ts)
+    // ended up calling the unguarded original notifyAgent() directly and
+    // bypassing validation entirely. Routing both surfaces through
+    // notifyAgent() means the roster check lives in exactly one place.
     try {
-      target = assertDeliverableRecipient(paths.ctxRoot, env.org, targetAgent);
+      const target = notifyAgent(paths, env.agentName, targetAgent, message, paths.ctxRoot, env.org);
+      console.log(`Signal sent to ${target}`);
     } catch (err) {
       console.error(String(err instanceof Error ? err.message : err));
       process.exit(1);
     }
-
-    // Write urgent signal file that fast-checker checks on every poll
-    const signalDir = join(paths.ctxRoot, 'state', target);
-    mkdirSync(signalDir, { recursive: true });
-    const signal = {
-      from: env.agentName,
-      message,
-      timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-    };
-    writeFileSync(join(signalDir, '.urgent-signal'), JSON.stringify(signal));
-
-    // Also send via normal message bus for persistence
-    try {
-      sendMessage(paths, env.agentName, target, 'urgent', message);
-    } catch { /* signal already written */ }
-
-    console.log(`Signal sent to ${target}`);
   });
 
 busCommand

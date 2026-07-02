@@ -139,7 +139,11 @@ export function resolveOrchestratorRecipient(org: string | undefined): string {
     const known = listAgents(ctxRoot, org).some((a) => a.name === resolved);
     return known ? resolved : DEFAULT_ORCHESTRATOR;
   } catch {
-    return resolved;
+    // prism re-gate #2 (LOW hardening): fail-safe to the default, not the
+    // unresolved name — if listAgents() ever throws unexpectedly, a bad/typo
+    // value must not reach the roster-validated send-message any more than it
+    // would on the normal "unknown agent" path above.
+    return DEFAULT_ORCHESTRATOR;
   }
 }
 

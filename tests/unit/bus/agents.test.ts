@@ -195,6 +195,7 @@ describe('Agent Discovery', () => {
     });
 
     it('creates signal file and bus message', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'target'), { recursive: true });
       notifyAgent(paths, 'sender', 'target', 'Wake up!', ctxRoot);
 
       // Check signal file exists
@@ -209,6 +210,7 @@ describe('Agent Discovery', () => {
     });
 
     it('signal file has correct JSON format', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'paul'), { recursive: true });
       notifyAgent(paths, 'boris', 'paul', 'New task available', ctxRoot);
 
       const signalFile = join(ctxRoot, 'state', 'paul', '.urgent-signal');
@@ -222,12 +224,33 @@ describe('Agent Discovery', () => {
     });
 
     it('creates state directory if it does not exist', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'newagent'), { recursive: true });
       const stateDir = join(ctxRoot, 'state', 'newagent');
       expect(existsSync(stateDir)).toBe(false);
 
       notifyAgent(paths, 'sender', 'newagent', 'Hello', ctxRoot);
 
       expect(existsSync(stateDir)).toBe(true);
+    });
+
+    // Prism re-gate #2 (2026-07-02): the shared notifyAgent() helper is now the
+    // ONE place both notify-agent CLI surfaces validate through — a live repro
+    // against the pre-fix SHA showed `cortextos notify-agent norma ...` exiting 0
+    // and recreating a retired-pseudonym state dir right after an inbox sweep.
+    it('rejects an unknown/retired target BEFORE writing any signal file or state dir', () => {
+      const stateDir = join(ctxRoot, 'state', 'norma');
+      expect(() => notifyAgent(paths, 'sender', 'norma', 'hello', ctxRoot)).toThrow(/not a deliverable recipient.*dbanalyst/);
+      expect(existsSync(stateDir)).toBe(false);
+    });
+
+    it('rejects a path-traversal target before any write', () => {
+      expect(() => notifyAgent(paths, 'sender', '../state', 'hello', ctxRoot)).toThrow(/Invalid agent name/);
+    });
+
+    it('returns the normalized (lowercase) target name', () => {
+      mkdirSync(join(ctxRoot, 'inbox', 'target'), { recursive: true });
+      expect(notifyAgent(paths, 'sender', 'Target', 'Wake up!', ctxRoot)).toBe('target');
+      expect(existsSync(join(ctxRoot, 'state', 'target', '.urgent-signal'))).toBe(true);
     });
   });
 
