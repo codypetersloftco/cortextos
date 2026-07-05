@@ -52,7 +52,7 @@ export function MessageFeed({ messages, onAgentClick, onMessageClick }: MessageF
             )}
             <TimeAgo date={msg.timestamp} className="ml-auto text-[11px] text-muted-foreground tabular-nums shrink-0" />
           </div>
-          <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words line-clamp-3">{msg.text}</p>
+          <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">{msg.text}</p>
         </Card>
       ))}
     </div>

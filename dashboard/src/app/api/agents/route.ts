@@ -119,8 +119,8 @@ export async function POST(request: NextRequest) {
 
   try {
     // 1. Copy template dir to orgs/{org}/agents/{name}/
-    const templateDir = path.join(frameworkRoot, 'templates', template);
-    const agentDir = path.join(frameworkRoot, 'orgs', org, 'agents', name);
+    const templateDir = path.join(/*turbopackIgnore: true*/ frameworkRoot, 'templates', template);
+    const agentDir = path.join(/*turbopackIgnore: true*/ frameworkRoot, 'orgs', org, 'agents', name);
 
     await fs.mkdir(agentDir, { recursive: true });
     await copyDir(templateDir, agentDir);
@@ -197,7 +197,7 @@ export async function POST(request: NextRequest) {
 // ---------------------------------------------------------------------------
 
 async function copyDir(src: string, dest: string): Promise<void> {
-  const entries = await fs.readdir(src, { withFileTypes: true });
+  const entries = await fs.readdir(/*turbopackIgnore: true*/ src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
@@ -205,7 +205,7 @@ async function copyDir(src: string, dest: string): Promise<void> {
       await fs.mkdir(destPath, { recursive: true });
       await copyDir(srcPath, destPath);
     } else {
-      await fs.copyFile(srcPath, destPath);
+      await fs.copyFile(/*turbopackIgnore: true*/ srcPath, destPath);
     }
   }
 }

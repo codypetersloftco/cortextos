@@ -22,7 +22,7 @@ export const CTX_ROOT = expandTilde(
 export const CTX_FRAMEWORK_ROOT = expandTilde(
   process.env.CTX_FRAMEWORK_ROOT ??
   process.env.CTX_PROJECT_ROOT ??
-  path.resolve(process.cwd(), '..'),
+  path.resolve(/*turbopackIgnore: true*/ process.cwd(), '..'),
 );
 
 // Helper functions required by downstream tasks
@@ -68,7 +68,7 @@ export function getEventsDir(org: string, agent: string): string {
 
 export function getGoalsPath(org: string): string {
   // Check framework root first (where the repo/source lives), then state dir
-  const frameworkPath = path.join(CTX_FRAMEWORK_ROOT, 'orgs', org, 'goals.json');
+  const frameworkPath = path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'orgs', org, 'goals.json');
   if (fs.existsSync(frameworkPath)) return frameworkPath;
   const statePath = path.join(CTX_ROOT, 'orgs', org, 'goals.json');
   if (fs.existsSync(statePath)) return statePath;
@@ -78,11 +78,11 @@ export function getGoalsPath(org: string): string {
 
 export function getOrgContextPath(org: string): string {
   // Org metadata lives in the framework root (the repo), not the state dir
-  return path.join(CTX_FRAMEWORK_ROOT, 'orgs', org, 'context.json');
+  return path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'orgs', org, 'context.json');
 }
 
 export function getOrgBrandVoicePath(org: string): string {
-  return path.join(CTX_FRAMEWORK_ROOT, 'orgs', org, 'brand-voice.md');
+  return path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'orgs', org, 'brand-voice.md');
 }
 
 // -- Agent-scoped paths (flat, not org-nested) --
@@ -108,11 +108,11 @@ export function getLogDir(agent: string): string {
 export function getAgentDir(name: string, org?: string): string {
   // Check project root first (where agent markdown files live), then state dir
   if (org) {
-    const projectPath = path.join(CTX_FRAMEWORK_ROOT, 'orgs', org, 'agents', name);
+    const projectPath = path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'orgs', org, 'agents', name);
     if (fs.existsSync(projectPath)) return projectPath;
     return path.join(CTX_ROOT, 'orgs', org, 'agents', name);
   }
-  const projectPath = path.join(CTX_FRAMEWORK_ROOT, 'agents', name);
+  const projectPath = path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'agents', name);
   if (fs.existsSync(projectPath)) return projectPath;
   return path.join(CTX_ROOT, 'agents', name);
 }
@@ -126,7 +126,7 @@ export function getOrgs(): string[] {
   // we keep the framework casing and discard the state-dir variant. Without
   // this, dashboard sync hits both names and floods the log with lookup
   // failures against the non-existent lowercase dir.
-  const frameworkOrgsDir = path.join(CTX_FRAMEWORK_ROOT, 'orgs');
+  const frameworkOrgsDir = path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'orgs');
   const stateOrgsDir = path.join(CTX_ROOT, 'orgs');
 
   // Map lowercase key -> canonical casing. Framework entries win over state
@@ -162,7 +162,7 @@ export function getAgentsForOrg(org: string): string[] {
   }
 
   // Check framework root (where agent identity/config files live)
-  const frameworkAgentsDir = path.join(CTX_FRAMEWORK_ROOT, 'orgs', org, 'agents');
+  const frameworkAgentsDir = path.join(/*turbopackIgnore: true*/ CTX_FRAMEWORK_ROOT, 'orgs', org, 'agents');
   if (fs.existsSync(frameworkAgentsDir)) {
     for (const d of fs.readdirSync(frameworkAgentsDir, { withFileTypes: true })) {
       if (d.isDirectory()) agents.add(d.name);

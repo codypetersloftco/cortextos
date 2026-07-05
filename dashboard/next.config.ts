@@ -18,8 +18,20 @@ const allowedDevOrigins = (process.env.DASHBOARD_ALLOWED_DEV_ORIGINS ?? '')
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['better-sqlite3'],
+  // Pin the Turbopack workspace root to THIS directory. A second lockfile at
+  // the repo root (cortextos/package-lock.json) makes Next infer the parent as
+  // the workspace root, so Turbopack resolves from cortextos/ and cannot find
+  // `tailwindcss` (it lives in dashboard/node_modules). Each failed compile
+  // leaked an unreaped postcss worker; under `next dev` + HMR that fork-bombed
+  // the host into OOM (incident 2026-06-25). __dirname is the dashboard dir
+  // regardless of the supervisor's cwd, unlike the old process.cwd().
   turbopack: {
-    root: process.cwd(),
+    root: __dirname,
+  },
+  outputFileTracingRoot: __dirname,
+  outputFileTracingExcludes: {
+    '*': ['./next.config.ts'],
+    '/api/agents': ['./next.config.ts'],
   },
   ...(allowedDevOrigins.length > 0 && { allowedDevOrigins }),
   async headers() {

@@ -310,10 +310,10 @@ export async function PATCH(
             : `Task status updated to ${status}: [${id}] ${task.title}`;
           const msg = capText(rawMsg);
           spawnSync(
-            'node',
+            'bash',
             [
-              path.join(frameworkRoot, 'dist', 'cli.js'),
-              'bus', 'send-message', createdBy, 'normal', msg,
+              path.join(frameworkRoot, 'bus', 'send-message.sh'),
+              createdBy, 'normal', msg,
             ],
             { timeout: 5000, stdio: 'pipe', windowsHide: true, env },
           );

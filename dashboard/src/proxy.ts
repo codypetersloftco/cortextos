@@ -49,7 +49,7 @@ function getAllowedOrigin(requestOrigin: string | null): string | null {
   return null;
 }
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const requestOrigin = request.headers.get('origin');
   const corsOrigin = getAllowedOrigin(requestOrigin) ?? 'null';

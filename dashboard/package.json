@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node -e \"console.error('[cortextos-dashboard] DEV SERVER DISABLED 2026-06-25 during incident recovery: next dev fork-bombs postcss because Turbopack infers the wrong workspace root (dual lockfiles -> cannot resolve tailwindcss), exhausting host memory. FIX FIRST: set turbopack.root to this dir in next.config.ts (and use next start, not next dev, under pm2), then restore dev from dev:real. Do NOT run dev:real until fixed.')\"",
+    "dev:real": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

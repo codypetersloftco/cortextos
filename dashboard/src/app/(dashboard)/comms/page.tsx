@@ -30,6 +30,8 @@ interface Channel {
   archived: boolean;
 }
 
+const COMMS_POLL_MS = 10000;
+
 export default function CommsPage() {
   const [feedMessages, setFeedMessages] = useState<BusMessage[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -105,7 +107,7 @@ export default function CommsPage() {
   }, [fetchData]);
 
   useEffect(() => {
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(fetchData, COMMS_POLL_MS);
     return () => clearInterval(interval);
   }, [fetchData]);
 
