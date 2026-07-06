@@ -43,6 +43,11 @@ export interface Heartbeat {
   last_heartbeat?: string; // ISO timestamp
   loop_interval?: number;
   uptime_seconds?: number;
+  // Tri-state cadence-aware verdict against THIS agent's own heartbeat-cron
+  // interval (not a fixed fleet-wide threshold) — 'unknown' when no enabled
+  // heartbeat cron exists (workers, bridge entries), never a guessed
+  // fresh/stale. See lib/data/heartbeats.ts resolveCadenceStaleness.
+  staleness?: 'fresh' | 'stale' | 'unknown';
 }
 
 // -- Task Types --

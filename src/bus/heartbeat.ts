@@ -1,7 +1,74 @@
 import { readdirSync, readFileSync, existsSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
-import type { Heartbeat, BusPaths } from '../types/index.js';
+import type { Heartbeat, BusPaths, CronDefinition } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { parseDurationMs, cronExpressionMinIntervalMs } from './cron-state.js';
+import { cronsPathFor } from './crons-schema.js';
+
+/**
+ * Tri-state per-agent staleness verdict (not boolean) — a fixed-threshold
+ * boolean stale flag silently misclassifies workers and bridge entries (cd,
+ * ephemeral prestage workers) that have no heartbeat cron at all: with no
+ * cadence to compare against, "not stale" and "stale" are BOTH wrong guesses.
+ * 'unknown' names that honestly instead of forcing a guess either way — the
+ * same silent-0 failure mode as a filter matching nothing and reporting
+ * false-green. See task_1783333452917 (cadence-aware staleness) and its
+ * design origin: a fixed 2h/5h threshold near-false-flagged every specialist
+ * with a longer heartbeat cadence (6/11 incident, prism hb_stale=true).
+ */
+export type HeartbeatStaleness = 'fresh' | 'stale' | 'unknown';
+
+/**
+ * Grace added on top of the agent's own heartbeat cron interval before
+ * calling it stale — absorbs scheduling jitter and normal cron-fire delay,
+ * not a second independent threshold. 50% of the interval, floored at 10
+ * minutes so short cadences (e.g. every-15-minutes) still get a meaningful
+ * buffer instead of flapping on ordinary timing noise.
+ */
+const STALENESS_GRACE_FACTOR = 0.5;
+const STALENESS_GRACE_FLOOR_MS = 10 * 60_000;
+
+/**
+ * Resolve an agent's own heartbeat cadence in milliseconds from its crons
+ * list, or NaN if no enabled "heartbeat"-named cron exists or its schedule
+ * can't be resolved to an interval. Tries duration shorthand first ("12h"),
+ * then falls back to estimating a 5-field cron expression's minimum interval
+ * — the same two schedule shapes the daemon's own scheduler already handles
+ * (see cron-scheduler.ts computeNextFireAt).
+ */
+function resolveOwnCadenceMs(crons: CronDefinition[]): number {
+  const hbCron = crons.find(c => c.name === 'heartbeat' && c.enabled);
+  if (!hbCron) return NaN;
+
+  const asDuration = parseDurationMs(hbCron.schedule);
+  if (!isNaN(asDuration)) return asDuration;
+
+  const asCronExpr = cronExpressionMinIntervalMs(hbCron.schedule);
+  return isNaN(asCronExpr) ? NaN : asCronExpr;
+}
+
+/**
+ * Compute the tri-state staleness verdict for one heartbeat against the
+ * agent's OWN cadence (not a fleet-wide fixed threshold).
+ *
+ * `crons` is the agent's own crons list (from readCrons/readAllHeartbeats'
+ * caller) — pass `[]` for an agent with no crons.json (workers, bridge
+ * entries) to correctly get 'unknown' rather than a guessed fresh/stale.
+ */
+export function resolveHeartbeatStaleness(
+  heartbeat: Pick<Heartbeat, 'last_heartbeat'>,
+  crons: CronDefinition[],
+  nowMs: number = Date.now(),
+): HeartbeatStaleness {
+  const cadenceMs = resolveOwnCadenceMs(crons);
+  if (isNaN(cadenceMs) || cadenceMs <= 0) return 'unknown';
+
+  const ageMs = nowMs - new Date(heartbeat.last_heartbeat).getTime();
+  if (isNaN(ageMs)) return 'unknown';
+
+  const grace = Math.max(cadenceMs * STALENESS_GRACE_FACTOR, STALENESS_GRACE_FLOOR_MS);
+  return ageMs > cadenceMs + grace ? 'stale' : 'fresh';
+}
 
 /**
  * SessionEnd-hook end-type markers (see src/hooks/hook-crash-alert.ts). A
@@ -162,9 +229,33 @@ export function detectDayNightMode(timezone: string): 'day' | 'night' {
 }
 
 /**
+ * Read one agent's crons list given an EXPLICIT ctxRoot, rather than going
+ * through crons.ts's readCrons() (which resolves CTX_ROOT from the process
+ * env — fine at runtime where env and paths.ctxRoot always agree, but wrong
+ * for tests/callers that construct a BusPaths pointing elsewhere). Mirrors
+ * crons.ts's own graceful-degradation contract: missing file or parse
+ * failure both return [], never throw.
+ */
+export function readCronsForRoot(ctxRoot: string, agentName: string): CronDefinition[] {
+  const cronsFile = join(ctxRoot, cronsPathFor(agentName));
+  try {
+    const raw = JSON.parse(readFileSync(cronsFile, 'utf-8'));
+    return Array.isArray(raw?.crons) ? raw.crons : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Read all agent heartbeats.
  * Scans state/ directory for agent subdirs containing heartbeat.json.
  * Matches dashboard heartbeat path: state/{agent}/heartbeat.json
+ *
+ * Each returned heartbeat carries a `staleness` verdict computed against
+ * THAT agent's own heartbeat-cron cadence (tri-state: fresh/stale/unknown —
+ * see resolveHeartbeatStaleness) so every consumer (dashboard, metrics
+ * report, fleet-health sweeps, liveness canaries) inherits cadence-aware
+ * staleness for free instead of each guessing its own fixed threshold.
  */
 export function readAllHeartbeats(paths: BusPaths): Heartbeat[] {
   const heartbeats: Heartbeat[] = [];
@@ -182,7 +273,10 @@ export function readAllHeartbeats(paths: BusPaths): Heartbeat[] {
     const hbPath = join(stateDir, agent, 'heartbeat.json');
     try {
       const content = readFileSync(hbPath, 'utf-8');
-      heartbeats.push(JSON.parse(content));
+      const hb: Heartbeat = JSON.parse(content);
+      const crons = readCronsForRoot(paths.ctxRoot, agent);
+      hb.staleness = resolveHeartbeatStaleness(hb, crons);
+      heartbeats.push(hb);
     } catch {
       // Skip agents without heartbeat
     }

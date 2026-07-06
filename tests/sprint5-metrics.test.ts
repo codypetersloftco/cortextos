@@ -68,7 +68,7 @@ describe('Sprint 5: Observability & Metrics', () => {
       expect(report.system.agents_healthy).toBe(1);
     });
 
-    it('detects stale heartbeats', () => {
+    it('detects stale heartbeats against the agent\'s own heartbeat-cron cadence', () => {
       writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), JSON.stringify({ bot1: { enabled: true } }), 'utf-8');
       const stateDir = join(ctxRoot, 'state', 'bot1');
       mkdirSync(stateDir, { recursive: true });
@@ -79,9 +79,43 @@ describe('Sprint 5: Observability & Metrics', () => {
         last_heartbeat: oldTime,
       }), 'utf-8');
 
+      // A 1h heartbeat cadence makes 6h-old unambiguously stale (task_1783333452917:
+      // staleness is computed against the agent's OWN cadence, not a fixed fleet
+      // threshold — this fixture supplies that cadence explicitly).
+      const cronsDir = join(ctxRoot, '.cortextOS', 'state', 'agents', 'bot1');
+      mkdirSync(cronsDir, { recursive: true });
+      writeFileSync(join(cronsDir, 'crons.json'), JSON.stringify({
+        updated_at: new Date().toISOString(),
+        crons: [{ name: 'heartbeat', prompt: 'x', schedule: '1h', enabled: true, created_at: new Date().toISOString() }],
+      }), 'utf-8');
+
       const report = collectMetrics(ctxRoot);
+      expect(report.agents.bot1.heartbeat_staleness).toBe('stale');
       expect(report.agents.bot1.heartbeat_stale).toBe(true);
       expect(report.system.agents_healthy).toBe(0);
+    });
+
+    it('treats an agent with no heartbeat cron as "unknown" staleness, not a guessed stale/fresh', () => {
+      // Workers and bridge entries (cd, ephemeral prestage workers) have no
+      // heartbeat cron at all -- a fixed-threshold boolean would silently
+      // misclassify them. This is the exact regression the tri-state exists
+      // to prevent: same 6h-old heartbeat as the test above, but with NO
+      // crons.json, must NOT read as stale (or as fresh) -- 'unknown', and
+      // still counted as healthy (absence of cadence data isn't evidence of
+      // being down).
+      writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), JSON.stringify({ bot1: { enabled: true } }), 'utf-8');
+      const stateDir = join(ctxRoot, 'state', 'bot1');
+      mkdirSync(stateDir, { recursive: true });
+
+      const oldTime = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+      writeFileSync(join(stateDir, 'heartbeat.json'), JSON.stringify({
+        last_heartbeat: oldTime,
+      }), 'utf-8');
+
+      const report = collectMetrics(ctxRoot);
+      expect(report.agents.bot1.heartbeat_staleness).toBe('unknown');
+      expect(report.agents.bot1.heartbeat_stale).toBe(false);
+      expect(report.system.agents_healthy).toBe(1);
     });
 
     it('counts pending approvals', () => {

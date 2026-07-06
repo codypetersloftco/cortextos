@@ -109,6 +109,12 @@ export interface Heartbeat {
   loop_interval: string;
   // Legacy field — sync.ts falls back to this if last_heartbeat absent
   timestamp?: string;
+  // Tri-state cadence-aware verdict computed by readAllHeartbeats against
+  // this agent's own heartbeat-cron interval — 'unknown' (not a guessed
+  // fresh/stale) when the agent has no enabled heartbeat cron at all
+  // (workers, bridge entries like cd). Not set by updateHeartbeat itself;
+  // only readAllHeartbeats populates it, since only it has crons context.
+  staleness?: 'fresh' | 'stale' | 'unknown';
 }
 
 // Approval Types
@@ -464,6 +470,17 @@ export interface OrgContext {
    *  save-output. The instruction is injected into the boot prompt
    *  dynamically — no agent markdown files are modified. */
   require_deliverables?: boolean;
+  /** Extra filesystem roots the daemon's spawn-worker IPC handler will
+   *  accept a worker `dir` under, in addition to the built-in allowlist
+   *  (CTX_ROOT / cwd / CTX_FRAMEWORK_ROOT / USERPROFILE). Use this when an
+   *  org's project workspace lives outside the built-in roots (e.g. a
+   *  relocated Loftco-style workspace) — set it instead of moving the
+   *  workspace back under an allowed root or symlinking it in. Each entry
+   *  is resolved and matched with the same prefix check as the built-in
+   *  roots (dir === root || dir.startsWith(root + sep)); invalid/missing
+   *  entries are ignored, not fatal. Org-owner-editable only — this file
+   *  is not writable via any agent-facing API. */
+  additional_worker_roots?: string[];
 }
 
 // Telegram Types

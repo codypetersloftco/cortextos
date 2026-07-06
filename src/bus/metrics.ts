@@ -7,6 +7,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, m
 import { join, basename, dirname } from 'path';
 import { execSync } from 'child_process';
 import { ensureDir } from '../utils/atomic.js';
+import { resolveHeartbeatStaleness, readCronsForRoot, type HeartbeatStaleness } from './heartbeat.js';
 
 // --- Types ---
 
@@ -15,7 +16,9 @@ export interface AgentMetrics {
   tasks_pending: number;
   tasks_in_progress: number;
   errors_today: number;
+  /** @deprecated use heartbeat_staleness (tri-state) — kept for existing consumers */
   heartbeat_stale: boolean;
+  heartbeat_staleness: HeartbeatStaleness;
 }
 
 export interface SystemMetrics {
@@ -177,22 +180,27 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
       }
     }
 
-    // Check heartbeat staleness (stale if >5 hours old)
-    let heartbeatStale = true;
+    // Cadence-aware staleness verdict (tri-state): compares this agent's
+    // heartbeat age against ITS OWN heartbeat-cron interval, not a fixed
+    // fleet-wide threshold. A fixed threshold (this used to be a flat ">5
+    // hours old") false-flags any agent whose real cadence is longer (e.g. a
+    // 12h heartbeat cron reads as "stale" after only 5h of genuinely normal
+    // silence — see task_1783333452917). 'unknown' (no enabled heartbeat
+    // cron — workers, bridge entries) counts as healthy, not stale: absence
+    // of a cadence to compare against is not evidence of being down.
+    let heartbeatStaleness: HeartbeatStaleness = 'unknown';
     const hbFile = join(ctxRoot, 'state', agent, 'heartbeat.json');
     if (existsSync(hbFile)) {
       try {
         const hb = JSON.parse(readFileSync(hbFile, 'utf-8'));
         if (hb.last_heartbeat) {
-          const hbTime = new Date(hb.last_heartbeat).getTime();
-          const age = Date.now() - hbTime;
-          if (age < 5 * 60 * 60 * 1000) {
-            heartbeatStale = false;
-            agentsHealthy++;
-          }
+          const crons = readCronsForRoot(ctxRoot, agent);
+          heartbeatStaleness = resolveHeartbeatStaleness(hb, crons);
         }
-      } catch { /* stale by default */ }
+      } catch { /* unknown by default */ }
     }
+    const heartbeatStale = heartbeatStaleness === 'stale';
+    if (!heartbeatStale) agentsHealthy++;
 
     agents[agent] = {
       tasks_completed: completed,
@@ -200,6 +208,7 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
       tasks_in_progress: inProgress,
       errors_today: errorsToday,
       heartbeat_stale: heartbeatStale,
+      heartbeat_staleness: heartbeatStaleness,
     };
   }
 
