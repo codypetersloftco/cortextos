@@ -44,7 +44,7 @@ module.exports = {
     {
       name: 'cortextos-dashboard',
       script: "C:\\Users\\cody\\cortextos\\dashboard\\node_modules\\next\\dist\\bin\\next",
-      args: "dev",
+      args: "start",
       cwd: "C:\\Users\\cody\\cortextos\\dashboard",
       env: {
         PORT: process.env.PORT || '3000',
