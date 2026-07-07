@@ -12,6 +12,40 @@ import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
 
+/**
+ * Extra filesystem roots the spawn-worker allowlist should accept, read from
+ * orgs/<CTX_ORG>/context.json's `additional_worker_roots` (see OrgContext in
+ * types/index.ts). Use this to grant a worker-dir allowlist entry outside the
+ * built-in roots (CTX_ROOT / cwd / CTX_FRAMEWORK_ROOT / USERPROFILE) — e.g. an
+ * org workspace relocated to its own drive — instead of a hardcoded path or a
+ * junction/symlink trick to make the real dir *look* like it's under an
+ * already-allowed root.
+ *
+ * Read fresh on every spawn-worker call (not cached), so an org-config edit
+ * takes effect without a daemon restart. Fails CLOSED: any error (missing
+ * env, missing file, parse error, non-array field) returns [] — a broken or
+ * missing config can only fail to widen the allowlist, never accidentally
+ * widen it. Mirrors agent-process.ts's isBootPingSuppressed/
+ * buildDeliverablesBlock context.json read pattern.
+ */
+export function getAdditionalWorkerRoots(): string[] {
+  try {
+    const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+    const org = process.env.CTX_ORG;
+    if (!frameworkRoot || !org) return [];
+    const contextPath = join(pathResolve(frameworkRoot), 'orgs', org, 'context.json');
+    if (!existsSync(contextPath)) return [];
+    const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
+    const roots = ctx.additional_worker_roots;
+    if (!Array.isArray(roots)) return [];
+    return roots
+      .filter((r: unknown): r is string => typeof r === 'string' && r.length > 0)
+      .map((r: string) => pathResolve(r));
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Manual fire cooldown — Subtask 4.5
 // ---------------------------------------------------------------------------
@@ -690,7 +724,8 @@ export class IPCServer {
             const allowed = isUnder(resolvedDir, ctxRoot)
               || isUnder(resolvedDir, cwd)
               || isUnder(resolvedDir, frameworkRoot)
-              || isUnder(resolvedDir, userHome);
+              || isUnder(resolvedDir, userHome)
+              || getAdditionalWorkerRoots().some(root => isUnder(resolvedDir, root));
             if (!allowed) {
               response = { success: false, error: 'Invalid worker dir' };
             } else {
