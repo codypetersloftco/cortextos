@@ -18,7 +18,7 @@ import { createReminder, listReminders, ackReminder, pruneReminders } from '../b
 import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-state.js';
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
-import { guard as formatGuard, isFormatGuardEnabled } from '../telegram/format-guard.js';
+import { guard as formatGuard, isFormatGuardEnabled, walkOutsideCodeSpans } from '../telegram/format-guard.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { renderMarkdownToHtml, renderMarkdownIndex } from '../bus/render-html.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
@@ -29,6 +29,24 @@ import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
 import { postWebhook } from '../discord/api.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
+
+/**
+ * PR-12 fix: codex-style agents emit the literal 2-char sequence '\n'/'\t'
+ * inside single-quoted bash (bash does not expand escapes there), which
+ * arrives at argv as literal text instead of a real newline/tab. Converts
+ * those literals to real control characters — but ONLY outside Markdown
+ * code spans. A Windows path inside a code span can legitimately contain
+ * the literal substring "\t" or "\n" (e.g. `C:\Users\cody\cortextos\tools\
+ * test` — "\tools" and "\test" both collide with the escape pattern);
+ * un-scoped, this same replace silently corrupted such paths into real TAB/
+ * newline characters before any downstream formatting ever saw them
+ * (live-fire finding, 2026-07-07, theta #41 re-fire). Shares its code-span
+ * definition with format-guard.ts's own R1/R2 rules via walkOutsideCodeSpans
+ * so the two can never drift on what counts as a code span.
+ */
+function normalizeLiteralEscapesOutsideCodeSpans(text: string): string {
+  return walkOutsideCodeSpans(text, (seg) => seg.replace(/\\n/g, '\n').replace(/\\t/g, '\t'));
+}
 
 /**
  * Check if the org requires deliverables and the task has none attached.
@@ -1046,7 +1064,12 @@ busCommand
     // Codex agents emit literal '\n'/'\t' inside single-quoted bash where bash
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
-    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    // Scoped to OUTSIDE code spans (live-fire finding, 2026-07-07): a
+    // Windows path inside a code span containing the literal substring
+    // "\t"/"\n" (e.g. `C:\Users\cody\cortextos\tools\test`) was previously
+    // corrupted into real TAB/newline chars by this same blind replace,
+    // before any downstream path-formatting logic ever saw it.
+    message = normalizeLiteralEscapesOutsideCodeSpans(message);
 
     // Theta #41 (2026-07-07): backslash-path-in-code-span (R1) and illegal
     // MarkdownV2-style escapes in regular-Markdown messages (R2) — both
@@ -1133,8 +1156,9 @@ busCommand
   .description('Send a message to the org Discord channel via the incoming webhook (DISCORD_WEBHOOK_URL)')
   .argument('<message>', 'Message text')
   .action(async (message: string) => {
-    // Normalize literal \n / \t (same codex-single-quote issue as send-telegram).
-    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    // Normalize literal \n / \t (same codex-single-quote issue as send-telegram),
+    // scoped to outside code spans (see send-telegram for the live-fire rationale).
+    message = normalizeLiteralEscapesOutsideCodeSpans(message);
 
     // Resolve the webhook URL: org secrets.env first, then process.env.
     // The webhook is a self-authenticating outbound credential — single
@@ -1805,8 +1829,9 @@ busCommand
   .argument('<reply>', 'Reply text')
   .argument('[msg-id]', 'Inbox message ID to ACK')
   .action((agent: string, reply: string, msgId?: string) => {
-    // Same literal '\n'/'\t' normalize as send-telegram (codex agent fix).
-    reply = reply.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    // Same literal '\n'/'\t' normalize as send-telegram (codex agent fix),
+    // scoped to outside code spans (see send-telegram for the live-fire rationale).
+    reply = normalizeLiteralEscapesOutsideCodeSpans(reply);
     const { mkdirSync, appendFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
