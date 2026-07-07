@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
-import { join, sep } from 'path';
+import { join } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
@@ -8,7 +8,7 @@ import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir } from '../utils/atomic.js';
-import { writeCortextosEnv } from '../utils/env.js';
+import { parseEnvFile, writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
 import type { SpawnDecision } from './spawn-governor.js';
@@ -23,9 +23,20 @@ import type { SpawnDecision } from './spawn-governor.js';
  * decision was silently checking a DIFFERENT directory than the one the
  * spawned CLI process actually resumes from. Falls back to homedir()/.claude
  * when unset/blank, matching Claude Code's own default.
+ *
+ * `configDirOverride`, when supplied, wins over process.env.CLAUDE_CONFIG_DIR.
+ * This exists because CLAUDE_CONFIG_DIR is set PER AGENT in that agent's own
+ * .env (loaded into the CHILD's env at PTY spawn time, see agent-pty.ts) --
+ * it is NOT present in the daemon's own process.env. Reading process.env
+ * here at the daemon-side shouldContinue() decision point silently missed
+ * every agent's real value (2026-07-07, found the same bounce as the
+ * drive-colon mangle bug below -- either alone was sufficient to break
+ * --continue). Callers that know the specific agent (shouldContinue()) must
+ * resolve that agent's own .env value and pass it in explicitly; the
+ * process.env fallback below only serves callers with no agent context.
  */
-export function resolveClaudeConfigBaseDir(): string {
-  const override = process.env.CLAUDE_CONFIG_DIR;
+export function resolveClaudeConfigBaseDir(configDirOverride?: string): string {
+  const override = configDirOverride ?? process.env.CLAUDE_CONFIG_DIR;
   return override && override.trim().length > 0 ? override : join(homedir(), '.claude');
 }
 
@@ -39,14 +50,26 @@ export function resolveClaudeConfigBaseDir(): string {
  * that only covers the helper in isolation would stay green even if this
  * function silently reverted to a hardcoded path (analyst audit, 2026-07-07,
  * same class as reference_unit_test_hides_caller_wiring_bug).
+ *
+ * `configDirOverride` is forwarded to resolveClaudeConfigBaseDir() -- see
+ * that function's doc for why a per-agent value must be passed explicitly.
  */
-export function hasClaudeConversationHistory(launchDir: string): boolean {
-  // Claude projects dir uses the absolute path with all separators replaced
-  // by dashes, e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss.
+export function hasClaudeConversationHistory(launchDir: string, configDirOverride?: string): boolean {
+  // Claude Code's real on-disk project-dir naming replaces EVERY character
+  // that isn't alphanumeric with a single dash -- not just path separators.
+  // e.g. C:\Users\foo\agents\boss -> C--Users-foo-agents-boss (colon AND
+  // backslashes each become their own dash). The prior `.split(sep).join('-')`
+  // only dashed backslashes, leaving the drive-colon intact as literal "C:-"
+  // -- readdirSync on that wrong path always threw ENOENT -> silently always
+  // "false" -> every Windows agent restart was forced fresh regardless of
+  // real history (2026-07-07, found live on the leg-2 daemon bounce; the
+  // prior wiring test's own oracle re-used this same `.split(sep).join('-')`
+  // mangle to build its "expected" dir, so it was self-consistently wrong
+  // and never caught this).
   const convDir = join(
-    resolveClaudeConfigBaseDir(),
+    resolveClaudeConfigBaseDir(configDirOverride),
     'projects',
-    launchDir.split(sep).join('-'),
+    launchDir.replace(/[^a-zA-Z0-9]/g, '-'),
   );
   try {
     const files = require('fs').readdirSync(convDir);
@@ -934,7 +957,26 @@ export class AgentProcess {
     const launchDir = this.config.working_directory || this.env.agentDir;
     if (!launchDir) return false;
 
-    return hasClaudeConversationHistory(launchDir);
+    return hasClaudeConversationHistory(launchDir, this.resolveAgentClaudeConfigDir());
+  }
+
+  /**
+   * This agent's own CLAUDE_CONFIG_DIR value, read directly from its .env
+   * file -- NOT process.env, which is the daemon's own environment and does
+   * not carry per-agent values (those are merged into the CHILD env at PTY
+   * spawn time, see agent-pty.ts). Returns undefined if the agent has no
+   * .env or no CLAUDE_CONFIG_DIR line, letting resolveClaudeConfigBaseDir()
+   * fall through to its own process.env/default fallback.
+   */
+  private resolveAgentClaudeConfigDir(): string | undefined {
+    if (!this.env.agentDir) return undefined;
+    const agentEnvFile = join(this.env.agentDir, '.env');
+    if (!existsSync(agentEnvFile)) return undefined;
+    try {
+      return parseEnvFile(agentEnvFile).CLAUDE_CONFIG_DIR || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private buildStartupPrompt(): string {

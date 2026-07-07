@@ -23,15 +23,36 @@ vi.mock('os', async () => {
 
 const { hasClaudeConversationHistory } = await import('../../../src/daemon/agent-process.js');
 
+// 2026-07-07 re-audit finding (analyst, criterion b): the ORIGINAL version of
+// this test built its "expected" dashed dir with
+// `launchDir.split(sep).join('-')` -- the EXACT SAME mangle the code-under-
+// test used. That made the oracle self-consistently wrong: both sides agreed
+// on a mangled path that only dashes path separators and leaves the Windows
+// drive-colon intact (e.g. "C:-Users-..."), so the test stayed green even
+// though the real on-disk Claude Code convention dashes EVERY non-alphanumeric
+// character (e.g. "C--Users-..."). The real fleet directories under
+// ~/.claude-test/projects/ are the actual oracle -- this constant reproduces
+// that convention independently of src/daemon/agent-process.ts, so a
+// regression back to split(sep).join('-') fails this test instead of passing it.
+function realClaudeCodeMangle(absolutePath: string): string {
+  return absolutePath.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
 describe('hasClaudeConversationHistory (shouldContinue wiring seam)', () => {
   let configuredHome: string;
   let savedConfigDir: string | undefined;
-  // Must use the OS-native separator, matching the real code's
-  // launchDir.split(sep).join('-') -- a forward-slash test path would not
-  // get dashed at all on Windows (sep is backslash there), silently
-  // building a directory the function under test never looks in.
   const launchDir = join(sep, 'Users', 'cody', 'agents', 'testagent');
-  const dashedDir = launchDir.split(sep).join('-');
+  const dashedDir = realClaudeCodeMangle(launchDir);
+
+  // The drive-colon case boss/analyst's first audit missed entirely: on
+  // Windows, join(sep, ...) never produces a drive letter (sep is just '\'),
+  // so no prior test exercised a REAL absolute Windows path like
+  // "C:\Users\cody\agents\testagent". This is the exact shape that broke on
+  // the 2026-07-07 leg-2 bounce (dist still had the split(sep).join('-') bug,
+  // colon survived as literal "C:", readdirSync ENOENT'd, every Claude agent
+  // was forced fresh).
+  const winLaunchDir = 'C:\\Users\\cody\\agents\\testagent';
+  const winDashedDir = realClaudeCodeMangle(winLaunchDir);
 
   beforeEach(() => {
     configuredHome = mkdtempSync(join(tmpdir(), 'cortextos-configdir-'));
@@ -90,5 +111,83 @@ describe('hasClaudeConversationHistory (shouldContinue wiring seam)', () => {
   it('returns false when neither directory has any jsonl files', () => {
     process.env.CLAUDE_CONFIG_DIR = configuredHome;
     expect(hasClaudeConversationHistory(launchDir)).toBe(false);
+  });
+
+  describe('Windows drive-colon case (2026-07-07 leg-2 bounce failure)', () => {
+    it('finds history under a real absolute Windows path including the drive letter', () => {
+      process.env.CLAUDE_CONFIG_DIR = configuredHome;
+
+      const configuredProjectsDir = join(configuredHome, 'projects', winDashedDir);
+      mkdirSync(configuredProjectsDir, { recursive: true });
+      writeFileSync(join(configuredProjectsDir, 'session.jsonl'), '{}');
+
+      expect(hasClaudeConversationHistory(winLaunchDir)).toBe(true);
+    });
+
+    // Criterion (c) from the re-audit gate: a leg that FAILS under real
+    // pre-fix conditions. This reproduces the OLD buggy mangle
+    // (`.split(sep).join('-')`, which leaves the drive-colon as literal
+    // "C:") directly -- proving it points somewhere history is NOT found,
+    // i.e. proving the pre-fix code would have returned false here even
+    // with real history present. If a future regression reintroduces the
+    // old mangle inside hasClaudeConversationHistory, this test's second
+    // assertion (the real function call) starts returning false and fails.
+    it('the pre-fix drive-colon mangle would have missed real history (regression guard)', () => {
+      process.env.CLAUDE_CONFIG_DIR = configuredHome;
+
+      const preFixBuggyDir = winLaunchDir.split(sep).join('-'); // "C:-Users-..."
+      expect(preFixBuggyDir).not.toBe(winDashedDir); // sanity: the two mangles genuinely differ
+
+      const configuredProjectsDir = join(configuredHome, 'projects', winDashedDir);
+      mkdirSync(configuredProjectsDir, { recursive: true });
+      writeFileSync(join(configuredProjectsDir, 'session.jsonl'), '{}');
+
+      // The pre-fix path (built with the old buggy mangle) has nothing under it.
+      const preFixDir = join(configuredHome, 'projects', preFixBuggyDir);
+      expect(() => require('fs').readdirSync(preFixDir)).toThrow();
+
+      // The real function, post-fix, correctly finds the real dir.
+      expect(hasClaudeConversationHistory(winLaunchDir)).toBe(true);
+    });
+  });
+
+  // Analyst re-audit GO note (2026-07-07): realClaudeCodeMangle() above is
+  // still a REGEX duplicated from the source's own formula -- if the SOURCE
+  // regex were subtly wrong, a test oracle built from the identical regex
+  // could share that exact mistake and never catch it (weaker independence
+  // than criterion (b) intends). This block uses LITERAL hardcoded strings
+  // copied directly from real `~/.claude-test/projects/` directory names
+  // observed on this box -- zero regex, zero shared formula with the code
+  // under test. A regression in the mangle logic (wrong regex, collapsed
+  // dashes, missed character class) fails these on pure string comparison.
+  describe('real fixture-dir oracle (hardcoded literal strings, zero shared formula with source)', () => {
+    it('matches the real engineer agent project dir name observed on this box', () => {
+      process.env.CLAUDE_CONFIG_DIR = configuredHome;
+
+      const realLaunchDir = 'C:\\Users\\cody\\cortextos\\orgs\\loftco-autopilot\\agents\\engineer';
+      // Literal, copied from `ls ~/.claude-test/projects/` -- not computed.
+      const realObservedDirName = 'C--Users-cody-cortextos-orgs-loftco-autopilot-agents-engineer';
+
+      const configuredProjectsDir = join(configuredHome, 'projects', realObservedDirName);
+      mkdirSync(configuredProjectsDir, { recursive: true });
+      writeFileSync(join(configuredProjectsDir, 'session.jsonl'), '{}');
+
+      expect(hasClaudeConversationHistory(realLaunchDir)).toBe(true);
+    });
+
+    it('matches the real OneDrive-space-dash-space project dir name (proves per-char, non-collapsing dash rule)', () => {
+      process.env.CLAUDE_CONFIG_DIR = configuredHome;
+
+      const realLaunchDir = 'C:\\Users\\cody\\OneDrive - Loftco Inc\\Claude Workspace\\AI Admin';
+      // Literal, copied from `ls ~/.claude-test/projects/` -- "OneDrive - Loftco Inc"
+      // has 3 consecutive non-alnum chars (space,dash,space) -> 3 dashes, not 1.
+      const realObservedDirName = 'C--Users-cody-OneDrive---Loftco-Inc-Claude-Workspace-AI-Admin';
+
+      const configuredProjectsDir = join(configuredHome, 'projects', realObservedDirName);
+      mkdirSync(configuredProjectsDir, { recursive: true });
+      writeFileSync(join(configuredProjectsDir, 'session.jsonl'), '{}');
+
+      expect(hasClaudeConversationHistory(realLaunchDir)).toBe(true);
+    });
   });
 });
