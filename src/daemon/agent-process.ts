@@ -13,6 +13,49 @@ import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
 import type { SpawnDecision } from './spawn-governor.js';
 
+/**
+ * Base directory Claude Code stores its config/session data under. Honors
+ * CLAUDE_CONFIG_DIR (the org-wide override used since the global-skills-
+ * junction fix) so shouldContinue()'s Claude-runtime check reads the SAME
+ * directory the actual `claude --continue` resolution uses, instead of
+ * always the hardcoded default -- previously this was hardcoded to
+ * homedir()/.claude regardless of CLAUDE_CONFIG_DIR, so the continue/fresh
+ * decision was silently checking a DIFFERENT directory than the one the
+ * spawned CLI process actually resumes from. Falls back to homedir()/.claude
+ * when unset/blank, matching Claude Code's own default.
+ */
+export function resolveClaudeConfigBaseDir(): string {
+  const override = process.env.CLAUDE_CONFIG_DIR;
+  return override && override.trim().length > 0 ? override : join(homedir(), '.claude');
+}
+
+/**
+ * True if a Claude-runtime agent launched from launchDir has existing
+ * conversation history (per resolveClaudeConfigBaseDir()'s directory) --
+ * the wiring seam shouldContinue() calls. Exported/isolated from
+ * shouldContinue() so a test can prove this specific seam (config-dir
+ * resolution -> projects-dir path -> readdir/jsonl check) is intact, not
+ * just that resolveClaudeConfigBaseDir() alone honors the env var — a test
+ * that only covers the helper in isolation would stay green even if this
+ * function silently reverted to a hardcoded path (analyst audit, 2026-07-07,
+ * same class as reference_unit_test_hides_caller_wiring_bug).
+ */
+export function hasClaudeConversationHistory(launchDir: string): boolean {
+  // Claude projects dir uses the absolute path with all separators replaced
+  // by dashes, e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss.
+  const convDir = join(
+    resolveClaudeConfigBaseDir(),
+    'projects',
+    launchDir.split(sep).join('-'),
+  );
+  try {
+    const files = require('fs').readdirSync(convDir);
+    return files.some((f: string) => f.endsWith('.jsonl'));
+  } catch {
+    return false;
+  }
+}
+
 type LogFn = (msg: string) => void;
 // OOM Wave 2 (Patch 6 / F2): a manager-owned spawn-gate callback. AgentProcess
 // holds only this thunk (not an AgentManager reference) to avoid a circular
@@ -891,22 +934,7 @@ export class AgentProcess {
     const launchDir = this.config.working_directory || this.env.agentDir;
     if (!launchDir) return false;
 
-    // Claude projects dir uses the absolute path with all separators replaced by dashes
-    // e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss (leading sep becomes -)
-    // Use homedir() for cross-platform compatibility (HOME is not set on Windows).
-    const convDir = join(
-      homedir(),
-      '.claude',
-      'projects',
-      launchDir.split(sep).join('-'),
-    );
-
-    try {
-      const files = require('fs').readdirSync(convDir);
-      return files.some((f: string) => f.endsWith('.jsonl'));
-    } catch {
-      return false;
-    }
+    return hasClaudeConversationHistory(launchDir);
   }
 
   private buildStartupPrompt(): string {

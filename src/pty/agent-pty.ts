@@ -410,6 +410,16 @@ export class AgentPTY {
       'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
       'TMPDIR', 'TEMP', 'TMP', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY',
       'NODE_PATH', 'COMSPEC', 'USERPROFILE',
+      // Defense-in-depth (2026-07-07 audit): every agent's own .env already
+      // sets CLAUDE_CONFIG_DIR explicitly (the primary, documented path —
+      // see the per-agent .env loader further down in spawn()), so this
+      // entry is a fallback, not the source of truth. If a future agent's
+      // .env is ever missing this line (fresh onboarding, a regenerated
+      // .env not preserving custom keys), inheriting it here from the
+      // daemon's own OS-level env (a persistent Windows User var on this
+      // machine) prevents a silent revert to the default ~/.claude dir for
+      // that one agent instead of failing loudly.
+      'CLAUDE_CONFIG_DIR',
       // Windows executable resolution. PATHEXT was missing from this
       // allowlist, so child shells inherited NO PATHEXT — PowerShell then
       // builds its executable-extension list as <inherited> + ".CPL", which
