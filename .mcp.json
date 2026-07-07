@@ -1,15 +1,8 @@
 {
   "mcpServers": {
     "mempalace": {
-      "type": "stdio",
-      "command": "C:/Users/cody/.mempalace/venv/Scripts/python.exe",
-      "args": [
-        "-m",
-        "mempalace.mcp_server"
-      ],
-      "env": {
-        "PYTHONUTF8": "1"
-      }
+      "type": "http",
+      "url": "http://127.0.0.1:38888/mcp"
     }
   }
 }
