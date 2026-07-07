@@ -18,6 +18,7 @@ import { createReminder, listReminders, ackReminder, pruneReminders } from '../b
 import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-state.js';
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
+import { guard as formatGuard, isFormatGuardEnabled } from '../telegram/format-guard.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { renderMarkdownToHtml, renderMarkdownIndex } from '../bus/render-html.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
@@ -1046,6 +1047,18 @@ busCommand
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
     message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+
+    // Theta #41 (2026-07-07): backslash-path-in-code-span (R1) and illegal
+    // MarkdownV2-style escapes in regular-Markdown messages (R2) — both
+    // repeat-bitten classes. Fail-open by construction (guard() never
+    // throws). Skipped when --plain-text is set: no Markdown parse_mode
+    // means no code-span/escape semantics to fix, and R1/R2 could otherwise
+    // mangle literal backslashes in plain text. Gated behind
+    // CTX_TELEGRAM_FORMAT_GUARD (default OFF) until live test-fire clears it.
+    if (!opts.plainText && isFormatGuardEnabled()) {
+      message = formatGuard(message) as string;
+    }
+
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';
