@@ -581,8 +581,12 @@ busCommand
     }
 
     for (const hb of heartbeats) {
-      const stale = new Date(hb.last_heartbeat) < new Date(Date.now() - 2 * 60 * 60 * 1000);
-      const staleFlag = stale ? ' [STALE]' : '';
+      // hb.staleness is the cadence-aware tri-state verdict (readAllHeartbeats
+      // already resolves it per-agent against that agent's own heartbeat cron
+      // cadence, not a fixed threshold) — reuse it rather than re-deriving a
+      // hardcoded 2h check here, which would drift out of sync with the real
+      // source of truth (the same class of bug the staleness rework fixed).
+      const staleFlag = hb.staleness === 'stale' ? ' [STALE]' : '';
       const label = hb.display_name ? `${hb.display_name} (${hb.agent})` : hb.agent;
       console.log(`${label} (${hb.org}) — ${hb.status}${staleFlag} — last seen ${hb.last_heartbeat}`);
       if (hb.current_task) console.log(`  task: ${hb.current_task}`);
