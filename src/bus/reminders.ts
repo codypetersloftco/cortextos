@@ -96,6 +96,36 @@ export function getOverdueReminders(paths: BusPaths): Reminder[] {
 }
 
 /**
+ * Pick which overdue reminders to (re-)inject into a RUNNING session.
+ *
+ * Mid-session delivery fix: reminders previously fired ONLY via the boot
+ * prompt (agent-process.buildReminderBlock), so one created mid-session with
+ * a mid-session fire_at silently waited for the next restart — sessions run
+ * ~71h, and this class bit three times before it was owned. The fast-checker
+ * now sweeps overdue reminders on its poll loop and injects them like inbox
+ * messages. A reminder stays `pending` until the agent acks it, so plain
+ * re-reading would re-inject every cycle — `injectedAt` (in-memory, per
+ * fast-checker instance) throttles re-injection per id; the cooldown doubles
+ * as the redelivery interval if the agent misses one.
+ *
+ * Pure function so the throttle semantics are unit-testable without a
+ * FastChecker/PTY harness.
+ */
+export function selectRemindersToInject(
+  reminders: Reminder[],
+  injectedAt: Map<string, number>,
+  now: number,
+  cooldownMs: number,
+): Reminder[] {
+  return reminders.filter(r => {
+    if (r.status !== 'pending') return false;
+    if (Date.parse(r.fire_at) > now) return false;
+    const last = injectedAt.get(r.id) || 0;
+    return now - last >= cooldownMs;
+  });
+}
+
+/**
  * Acknowledge a reminder by ID — marks it as handled.
  */
 export function ackReminder(paths: BusPaths, id: string): void {

@@ -5,6 +5,7 @@ import { createHash } from 'crypto';
 import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox } from '../bus/message.js';
+import { listReminders, selectRemindersToInject, type Reminder } from '../bus/reminders.js';
 import { updateApproval } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -22,6 +23,13 @@ export class FastChecker {
   private paths: BusPaths;
   private running: boolean = false;
   private pollInterval: number;
+
+  // Mid-session reminder delivery (see pollCycle): sweep sub-cadence and the
+  // per-id re-injection cooldown (doubles as redelivery if the agent misses one).
+  private static readonly REMINDER_SWEEP_MS = 30_000;
+  private static readonly REMINDER_REINJECT_MS = 10 * 60_000;
+  private lastReminderSweepAt = 0;
+  private reminderInjectedAt = new Map<string, number>();
   private log: LogFn;
   private typingLastSent: number = 0;
   // Hook-based typing: track when we last injected a Telegram message (ms)
@@ -188,6 +196,32 @@ export class FastChecker {
       ackIds.push(msg.id);
     }
 
+    // Overdue persistent reminders — mid-session delivery (the boot prompt
+    // was previously the ONLY delivery path, so a reminder created mid-session
+    // never fired until the next restart; 3 known instances). Swept on a
+    // slower sub-cadence than the poll loop; NOT auto-acked (the agent acks
+    // after handling, per the designed lifecycle), so re-injection is
+    // throttled per id and the timestamp is recorded only after a successful
+    // inject (an inject that fails retries next sweep, not in 10 minutes).
+    const remindersToMark: string[] = [];
+    if (Date.now() - this.lastReminderSweepAt >= FastChecker.REMINDER_SWEEP_MS) {
+      this.lastReminderSweepAt = Date.now();
+      try {
+        const due = selectRemindersToInject(
+          listReminders(this.paths),
+          this.reminderInjectedAt,
+          Date.now(),
+          FastChecker.REMINDER_REINJECT_MS,
+        );
+        for (const r of due) {
+          messageBlock += this.formatReminder(r);
+          remindersToMark.push(r.id);
+        }
+      } catch (e) {
+        this.log(`Reminder sweep failed: ${e}`);
+      }
+    }
+
     // Inject if there's anything
     if (messageBlock) {
       const injected = await this.agent.injectMessage(messageBlock);
@@ -195,6 +229,9 @@ export class FastChecker {
         // ACK inbox messages
         for (const id of ackIds) {
           ackInbox(this.paths, id);
+        }
+        for (const id of remindersToMark) {
+          this.reminderInjectedAt.set(id, Date.now());
         }
         this.log(`Injected ${messageBlock.length} bytes`);
         // Only update typing timestamp for Telegram messages, not inbox/cron.
@@ -215,6 +252,22 @@ export class FastChecker {
 
     // Context monitor: check usage thresholds and fire warnings/handoffs
     await this.checkContextStatus();
+  }
+
+  /**
+   * Format an overdue reminder for mid-session injection. The prompt is
+   * agent-authored but still fence-wrapped (it can carry arbitrary text).
+   */
+  private formatReminder(r: Reminder): string {
+    return (
+      `
+=== REMINDER [${r.id}] (was due ${r.fire_at}) ===
+` +
+      `${wrapFenceSafe(r.prompt)}
+` +
+      `Handle it, then run: cortextos bus ack-reminder ${r.id}
+`
+    );
   }
 
   /**
