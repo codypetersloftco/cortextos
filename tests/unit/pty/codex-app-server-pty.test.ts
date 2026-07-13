@@ -792,7 +792,15 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
 
-    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+    // FIX-C ladder is seconds-long in prod; shrink for the test (the
+    // ATTEMPT COUNT and never-adopt-sibling behavior are what's under test).
+    const savedDelays = CodexAppServerPTY.RESUME_RETRY_DELAYS_MS;
+    CodexAppServerPTY.RESUME_RETRY_DELAYS_MS = [10, 10, 10, 10];
+    try {
+      await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+    } finally {
+      CodexAppServerPTY.RESUME_RETRY_DELAYS_MS = savedDelays;
+    }
 
     const resumedSibling = requestMock.mock.calls.some(
       ([method, params]) => method === 'thread/resume'

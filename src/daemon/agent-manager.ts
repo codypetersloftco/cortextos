@@ -142,6 +142,20 @@ export class AgentManager {
     // re-discover and re-start any agent dir on disk regardless of user intent.
     const instanceEnabled = this.readInstanceEnableList();
 
+    // FIX-C (task_1783965328433, 2026-07-13): all codex-app-server agents
+    // share ONE sqlite state dir (~/.codex — auth + skills live there too).
+    // A fleet boot cold-started them at the same instant, and concurrent
+    // state-runtime init hits "database is locked" (SQLITE_BUSY) →
+    // initialize/thread-resume RPC timeouts → degraded-start loops
+    // (prism+dbanalyst, every daemon restart; worse when the operator's own
+    // ChatGPT-app codex holds the lock). Stagger codex starts serially so
+    // the daemon never races itself; the in-client retry ladder
+    // (codex-app-server-pty) absorbs residual contention from external
+    // codex processes. Per-agent CODEX_HOME is the by-construction fix,
+    // deferred until the auth-sharing design lands with the login work.
+    const CODEX_STAGGER_MS = 20_000;
+    let codexStarted = 0;
+
     for (const { name, dir, org, config } of agentDirs) {
       // Per-agent config.json `enabled: false` (existing behavior, unchanged)
       if (config.enabled === false) {
@@ -154,6 +168,14 @@ export class AgentManager {
         console.log(`[agent-manager] Skipping disabled agent: ${name} (enabled-agents.json)`);
         continue;
       }
+      if (config.runtime === 'codex-app-server' && codexStarted > 0) {
+        console.log(
+          `[agent-manager] Staggering codex agent ${name} by ${CODEX_STAGGER_MS / 1000}s ` +
+          `(shared ~/.codex sqlite — concurrent cold-start init hits 'database is locked')`,
+        );
+        await new Promise((r) => setTimeout(r, CODEX_STAGGER_MS));
+      }
+      if (config.runtime === 'codex-app-server') codexStarted++;
       // BUG-043 fix: pass the per-agent org so startAgent can use it instead
       // of falling back to `this.org` (the daemon's startup org).
       await this.startAgent(name, dir, config, org);

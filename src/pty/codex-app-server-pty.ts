@@ -523,16 +523,46 @@ export class CodexAppServerPTY {
     await this._rpc.connect();
   }
 
+  // FIX-C retry ladders (shared-~/.codex sqlite contention clears in
+  // ~seconds-to-a-minute, measured 2026-07-13; the old 500/1500ms resume
+  // rungs exhausted long before an external codex — e.g. the operator's
+  // ChatGPT-app instance — released the lock). BOUNDED on purpose: on
+  // exhaustion initialize THROWS into the degraded-start chain (which
+  // alarms/HALTs at its own bound) and resume falls through to a fresh
+  // thread — patient, never forever. Static so tests can shrink them.
+  static INIT_RETRY_DELAYS_MS: number[] = [2_000, 5_000, 15_000];
+  static RESUME_RETRY_DELAYS_MS: number[] = [500, 1_500, 5_000, 15_000];
+
   private async initializeRpc(): Promise<void> {
-    await this.request('initialize', {
-      clientInfo: {
-        name: 'cortextos',
-        title: 'cortextOS',
-        version: this.getPackageVersion(),
-      },
-      capabilities: { experimentalApi: true },
-    });
-    this._rpc?.notify('initialized');
+    // FIX-C: initialize can time out on cold start when another codex
+    // process holds the shared ~/.codex sqlite lock ("database is locked",
+    // SQLITE_BUSY) — observed clearing within ~a minute. Patient retries
+    // turn a degraded-start loop into a slow clean start. Same ladder
+    // rationale as thread/resume below.
+    const initDelaysMs = CodexAppServerPTY.INIT_RETRY_DELAYS_MS;
+    for (let attempt = 0; attempt <= initDelaysMs.length; attempt += 1) {
+      try {
+        await this.request('initialize', {
+          clientInfo: {
+            name: 'cortextos',
+            title: 'cortextOS',
+            version: this.getPackageVersion(),
+          },
+          capabilities: { experimentalApi: true },
+        });
+        this._rpc?.notify('initialized');
+        return;
+      } catch (err) {
+        this._outputBuffer.push(
+          `[codex-app-server] initialize failed (attempt ${attempt + 1}/${initDelaysMs.length + 1}): ${err}\n`,
+        );
+        if (attempt < initDelaysMs.length) {
+          await sleep(initDelaysMs[attempt]);
+        } else {
+          throw err;
+        }
+      }
+    }
   }
 
   private async startOrResumeThread(_mode: 'fresh' | 'continue'): Promise<void> {
@@ -549,7 +579,7 @@ export class CodexAppServerPTY {
       // before giving up — a transient failure must never escalate into starting fresh
       // (let alone adopting a sibling). Only after the retries are exhausted do we treat
       // our own thread as unrecoverable.
-      const resumeDelaysMs = [500, 1500];
+      const resumeDelaysMs = CodexAppServerPTY.RESUME_RETRY_DELAYS_MS;
       for (let attempt = 0; attempt <= resumeDelaysMs.length; attempt += 1) {
         try {
           const resumed = await this.request<ThreadResponse>('thread/resume', {
