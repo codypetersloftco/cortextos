@@ -207,6 +207,13 @@ module.exports = {
         CTX_FRAMEWORK_ROOT: ${JSON.stringify(projectRoot)},
         CTX_PROJECT_ROOT: ${JSON.stringify(projectRoot)},
         CTX_ORG: process.env.CTX_ORG || ${JSON.stringify(detectedOrg)},
+        // FIX-A: prefer IPv4 DNS results — this host's IPv6 route to
+        // api.telegram.org is dead; v6-first lookups caused intermittent
+        // Telegram poller 'fetch failed'. Appended (not replaced) so a
+        // shell-provided NODE_OPTIONS survives. Code-level twin lives at
+        // src/daemon/index.ts (setDefaultResultOrder) — this env copy makes
+        // child node processes inherit the preference.
+        NODE_OPTIONS: ((process.env.NODE_OPTIONS || '') + ' --dns-result-order=ipv4first').trim(),
       },
       // BUG-016: max_restarts stays 50 (NOT reverted to 10). PM2 counts these
       // toward unstable restarts; min_uptime below resets the count after a

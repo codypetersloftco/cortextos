@@ -4,7 +4,19 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { homedir } from 'os';
+import { setDefaultResultOrder } from 'dns';
 import { ensureDir } from '../utils/atomic.js';
+
+// FIX-A (task_1783965327820, 2026-07-13): this host cannot reach
+// api.telegram.org over IPv6 (instant connect fail); IPv4 is fine. Node's
+// default verbatim DNS order means fetch sometimes dials the AAAA first →
+// intermittent "fetch failed" in the Telegram poller = the fleet silently
+// missed the operator's live messages. Prefer IPv4 for every lookup in the
+// daemon process (v6 remains a fallback, so this is safe on healthy-v6
+// hosts too). Belt: `cortextos ecosystem` also bakes
+// NODE_OPTIONS=--dns-result-order=ipv4first into the pm2 env so child node
+// processes inherit the same preference.
+setDefaultResultOrder('ipv4first');
 
 // Each fast-checker registers a process-level SIGUSR1 handler (see
 // fast-checker.ts:102). With >10 active agents the default Node listener cap
