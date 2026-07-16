@@ -28,7 +28,7 @@ set -euo pipefail
 INBOX="${CTX_ROOT:?CTX_ROOT unset}/inbox"
 ARCHIVE_DIR="${INBOX}/_archive"
 MODE="${1:-dry-run}"
-KEEP="analyst boss dbanalyst engineer penny prism _shared cd chief"   # _archive skipped separately
+KEEP="analyst boss dbanalyst engineer penny prism _shared cd chief codex"   # _archive skipped separately; codex = AP-Desk-scoped external harness (Cody-approved 2026-07-16, task_1784225792893)
 RECENT_SEC="${INBOX_SWEEP_RECENT_SEC:-300}"   # 5-minute activity window for the fleet-quiet assert
 
 is_in() { case " $2 " in *" $1 "*) return 0;; *) return 1;; esac; }
