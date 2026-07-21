@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths } from '../types/index.js';
+import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths, Task } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { parseEnvFile } from '../utils/env.js';
 import { randomString } from '../utils/random.js';
@@ -175,16 +175,25 @@ function pingAgentChatId(
  * sites should pass env.frameworkRoot explicitly; daemon-side callers
  * may rely on the env var.
  */
-export async function createApproval(
+/**
+ * Synchronous core of createApproval: writes the pending approval object and
+ * returns its id, WITHOUT the async Telegram fan-out. Extracted so the
+ * always_ask enforcement path in createTask (G1) can create+link an approval
+ * inline — keeping createTask synchronous (its many callers stay unchanged)
+ * while still enforcing at creation (safe-by-construction, not caller-
+ * dependent). `taskId`, when given, links the approval to the task it gates so
+ * updateApproval can unblock it on resolve. The async notification fan-out is
+ * the caller's responsibility (best-effort; see createApproval).
+ */
+export function createApprovalObject(
   paths: BusPaths,
   agentName: string,
   org: string,
   title: string,
   category: ApprovalCategory,
   context?: string,
-  frameworkRoot?: string,
-  agentDir?: string,
-): Promise<string> {
+  taskId?: string,
+): Approval {
   validateApprovalCategory(category);
 
   const epoch = Math.floor(Date.now() / 1000);
@@ -204,11 +213,28 @@ export async function createApproval(
     updated_at: now,
     resolved_at: null,
     resolved_by: null,
+    ...(taskId ? { task_id: taskId } : {}),
   };
 
   const pendingDir = join(paths.approvalDir, 'pending');
   ensureDir(pendingDir);
   atomicWriteSync(join(pendingDir, `${approvalId}.json`), JSON.stringify(approval));
+
+  return approval;
+}
+
+export async function createApproval(
+  paths: BusPaths,
+  agentName: string,
+  org: string,
+  title: string,
+  category: ApprovalCategory,
+  context?: string,
+  frameworkRoot?: string,
+  agentDir?: string,
+): Promise<string> {
+  const approval = createApprovalObject(paths, agentName, org, title, category, context);
+  const approvalId = approval.id;
 
   // Fan-out to the activity channel so the operator can approve/deny from
   // Telegram without opening the dashboard. AWAITED so short-lived CLI callers do
@@ -264,8 +290,40 @@ export function updateApproval(
       const msg = `Approval decision: ${status.toUpperCase()}\napproval_id: ${approvalId}\ndecision: ${status}${noteText}`;
       sendMessage(paths, 'system', approval.requesting_agent, 'urgent', msg);
     }
+
+    // G1: if this approval gates a task (always_ask enforcement), the task was
+    // created `blocked`. Resolving the approval releases it — approved OR
+    // rejected, the gate has done its job and the task should no longer sit
+    // `blocked` on a now-decided approval. A rejected decision returns the task
+    // to `pending` so the owner can see it and cancel/rework; it does not
+    // auto-cancel (that is the owner's call, not the gate's).
+    if (approval.task_id) {
+      unblockTaskForApproval(paths, approval.task_id, approvalId);
+    }
   } catch (err) {
     throw new Error(`Approval ${approvalId} not found: ${err}`);
+  }
+}
+
+/**
+ * Release a task that an always_ask approval was gating (G1). Done inline with
+ * fs (not via bus/task.ts) so approval.ts does NOT import task.ts — task.ts
+ * imports createApprovalObject from here, and a mutual import would be a cycle.
+ * Only flips a task that is actually `blocked` on THIS approval; anything else
+ * (already progressed, different approval, missing file) is left untouched.
+ */
+function unblockTaskForApproval(paths: BusPaths, taskId: string, approvalId: string): void {
+  const filePath = join(paths.taskDir, `${taskId}.json`);
+  if (!existsSync(filePath)) return; // task gone — nothing to release
+  try {
+    const task: Task = JSON.parse(readFileSync(filePath, 'utf-8'));
+    if (task.status !== 'blocked' || task.approval_id !== approvalId) return;
+    task.status = 'pending';
+    task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    atomicWriteSync(filePath, JSON.stringify(task));
+  } catch {
+    // Corrupt/unreadable task file — do not throw from the approval path;
+    // the approval itself already resolved. Surfaced elsewhere on read.
   }
 }
 

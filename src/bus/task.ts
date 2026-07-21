@@ -1,10 +1,26 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { join } from 'path';
-import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
+import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport, ApprovalCategory } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority, validateTaskId } from '../utils/validate.js';
 import { logEvent } from './event.js';
+import { createApprovalObject } from './approval.js';
+
+/**
+ * The four money-path categories that trigger G1 always_ask enforcement.
+ * `other` is deliberately excluded — enforcement is scoped to
+ * external-comms / financial / deployment / data-deletion only, bounding the
+ * blast radius to money/deploy/delete decisions. Kept as a Set so the check
+ * is a membership test, and any NEW ApprovalCategory added to the type that
+ * should gate must be added here explicitly (positive-set, not negated).
+ */
+const ALWAYS_ASK_CATEGORIES: ReadonlySet<ApprovalCategory> = new Set<ApprovalCategory>([
+  'external-comms',
+  'financial',
+  'deployment',
+  'data-deletion',
+]);
 
 /**
  * Create a new task. Identical JSON format to bash create-task.sh.
@@ -23,6 +39,15 @@ export function createTask(
     dueDate?: string;
     blockedBy?: string[];
     blocks?: string[];
+    /**
+     * G1 always_ask enforcement: when this is one of the four money-path
+     * categories (external-comms / financial / deployment / data-deletion),
+     * the task is created `blocked` behind an auto-created, linked approval
+     * object — the decision cannot proceed un-approved and leaves an
+     * auditable record. `other`/undefined = untouched (blast radius bounded
+     * to the money-path).
+     */
+    category?: ApprovalCategory;
   } = {},
 ): string {
   const {
@@ -34,7 +59,10 @@ export function createTask(
     dueDate = '',
     blockedBy = [],
     blocks = [],
+    category,
   } = options;
+
+  const requiresApproval = category !== undefined && ALWAYS_ASK_CATEGORIES.has(category);
 
   validatePriority(priority);
 
@@ -60,13 +88,21 @@ export function createTask(
     for (const downId of blocks) detectCycleOrThrow(paths, downId, [taskId], virtualTask);
   }
 
+  // G1: an always_ask category creates a linked approval object and the task
+  // is born `blocked` behind it — safe-by-construction: a money/deploy/delete
+  // task cannot exist un-gated, with no dependence on the caller remembering a
+  // flag. Approval object written via the SYNC core so createTask stays sync.
+  const approval = requiresApproval
+    ? createApprovalObject(paths, agentName, org, `Approval required: ${title}`, category!, description, taskId)
+    : null;
+
   const task: Task = {
     id: taskId,
     title,
     description,
     type: 'agent',
-    needs_approval: needsApproval,
-    status: 'pending',
+    needs_approval: needsApproval || requiresApproval,
+    status: requiresApproval ? 'blocked' : 'pending',
     assigned_to: assignee,
     created_by: agentName,
     org,
@@ -80,6 +116,7 @@ export function createTask(
     archived: false,
     ...(blockedBy.length ? { blocked_by: [...blockedBy] } : {}),
     ...(blocks.length ? { blocks: [...blocks] } : {}),
+    ...(approval ? { approval_id: approval.id } : {}),
   };
 
   ensureDir(paths.taskDir);

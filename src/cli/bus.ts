@@ -225,7 +225,8 @@ busCommand
   .option('--needs-approval', 'Require human approval before execution')
   .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string }) => {
+  .option('--category <c>', 'Approval category: external-comms, financial, deployment, data-deletion (any of these gates the task behind an auto-created approval), or other')
+  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; category?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     // Owner-on-create forward-guard (task_1782873111596): reject a task assigned to
@@ -244,6 +245,15 @@ busCommand
       }
     }
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
+    // Validate the category up front so a typo (e.g. "financials") fails loudly
+    // rather than silently skipping the money-path gate — an unrecognized
+    // category that quietly created an un-gated task is exactly the enumeration
+    // hole (refuse the unlisted, never guess).
+    const validCategories = ['external-comms', 'financial', 'deployment', 'data-deletion', 'other'];
+    if (opts.category !== undefined && !validCategories.includes(opts.category)) {
+      console.error(`Invalid --category "${opts.category}". Must be one of: ${validCategories.join(', ')}`);
+      process.exit(1);
+    }
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
       assignee,
@@ -252,6 +262,7 @@ busCommand
       needsApproval: opts.needsApproval ?? false,
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
+      category: opts.category as ApprovalCategory | undefined,
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)

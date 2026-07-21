@@ -68,6 +68,13 @@ export interface Task {
    */
   blocks?: string[];
   blocked_by?: string[];
+  /**
+   * The approval gating this task, set by the always_ask enforcement path
+   * (G1). When present the task is created `blocked` and cannot progress
+   * until that approval resolves. Absent for tasks with no always_ask
+   * category — enforcement is scoped to the money-path only.
+   */
+  approval_id?: string;
 }
 
 // Event Types
@@ -140,6 +147,13 @@ export interface Approval {
   updated_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+  /**
+   * The task this approval gates, when created by the always_ask
+   * enforcement path (G1). Present only for enforcement-linked approvals;
+   * absent for standalone (e.g. experiment) approvals. Lets updateApproval
+   * unblock the linked task on resolve.
+   */
+  task_id?: string;
 }
 
 // Agent Config Types (config.json)
