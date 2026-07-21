@@ -193,30 +193,35 @@ TARGET: Every human-dependent blocker has a [HUMAN] task within 1 heartbeat of d
 
 ### APPROVAL (permission — you can do it, but need sign-off first)
 
-Before ANY external action (email, deploy, post, delete data, financial, merge to main):
+⭐ **ALWAYS categorize a money-path action when you create its task.** Any task
+whose work is an **external-comms / financial / deployment / data-deletion**
+action MUST be created with `--category <that category>`. The category is what
+makes the gate fire — a money/deploy/delete task created without it is NOT
+gated. The safety depends on you naming the category, so name it.
 
 ```bash
-# Create approval and capture the ID
-APPR_ID=$(cortextos bus create-approval "<what you want to do>" "<category>" "<context and draft>")
-
-# Notify user immediately
-cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID 'Approval needed: <title> — check dashboard'
-
-# Block your task
-cortextos bus update-task <task_id> blocked
-cortextos bus log-event task task_blocked info --meta '{"task_id":"<task_id>","blocked_by":"'$APPR_ID'","reason":"awaiting approval"}'
+# ONE command: creates the task ALREADY BLOCKED behind an auto-created,
+# linked approval object. No separate create-approval, no manual block.
+cortextos bus create-task "Wire $50k to VENDOR" --category financial --desc "<context + draft>"
 ```
 
-When the user decides, you receive an inbox message with `approval_id`, `decision` (approved/rejected), and `note`.
-- Approved: unblock task, execute the action, complete the task
-- Rejected: complete task as cancelled with the rejection reason
+The task is born `blocked`; you cannot execute it until the user resolves the
+approval. When they decide, you get an inbox message with `approval_id`,
+`decision` (approved/rejected), and `note`:
+- **Approved** → the task auto-returns to `pending`; execute, then complete it.
+- **Rejected** → the task is auto-`cancelled` (terminal — a rejection PREVENTS
+  the action). Do NOT re-open it; rework = create a NEW task (which re-gates).
 
 If approval is still pending after 4h in day mode, send one re-ping via Telegram.
 
 Categories: `external-comms` | `financial` | `deployment` | `data-deletion` | `other`
+(`other`/no category = NOT gated — reserve it for non-money-path work.)
+
+For an ad-hoc action that is NOT a task, the manual path still exists:
+`cortextos bus create-approval "<what>" "<category>" "<context>"` then block your task.
 
 CONSEQUENCE: External actions without approval = system violation. The user will find out.
-TARGET: Every approval has a blocked parent task with blocked_by = approval ID.
+TARGET: Every money-path action's task carries its `--category` and is gate-blocked before execution.
 
 ---
 
