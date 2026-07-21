@@ -82,14 +82,31 @@ describe('always_ask approval enforcement (G1, enforce-at-creation, scoped)', ()
     expect((task as any).approval_id).toBe(approvals[0].id);
   });
 
-  it('resolving the approval UNBLOCKS the task', async () => {
+  it('APPROVING the approval unblocks the task to an executable state', async () => {
     const id = await createTask(paths, 'paul', 'acme', 'deploy prod', { category: 'deployment' } as any);
     const approvalId = (readTask(paths, id) as any).approval_id as string;
     expect(readTask(paths, id).status).toBe('blocked');
 
     updateApproval(paths, approvalId, 'approved');
 
-    expect(readTask(paths, id).status, 'approved -> task no longer blocked').not.toBe('blocked');
+    // approved = the gate is satisfied → executable
+    expect(readTask(paths, id).status, 'approved -> pending (executable)').toBe('pending');
+  });
+
+  it('REJECTING the approval makes the task NON-EXECUTABLE (cancelled), never pending', async () => {
+    // The reject path is the one that matters most: a rejection must PREVENT
+    // the action. If a rejected money-path task returned to 'pending' it would
+    // be executable again — an agent could pick it up and DEFEAT the gate
+    // exactly when it said no. Rejected must be terminal. (boss 1784652695327)
+    const id = await createTask(paths, 'paul', 'acme', 'wire $50k', { category: 'financial' } as any);
+    const approvalId = (readTask(paths, id) as any).approval_id as string;
+    expect(readTask(paths, id).status).toBe('blocked');
+
+    updateApproval(paths, approvalId, 'rejected');
+
+    const status = readTask(paths, id).status;
+    expect(status, 'rejected -> cancelled (terminal, non-executable)').toBe('cancelled');
+    expect(status, 'rejected must NOT return the task to an executable pending state').not.toBe('pending');
   });
 
   it('a non-always_ask category ("other") does NOT create an approval or block', async () => {

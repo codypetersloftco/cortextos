@@ -1870,6 +1870,34 @@ busCommand
   });
 
 // ---------------------------------------------------------------------------
+// always-ask-retro-sweep — surface pre-guard money-path tasks (G1 companion)
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('always-ask-retro-sweep')
+  .description('Surface un-gated money-path tasks predating the always_ask guard (read-only; SUGGESTS a category for human review, never auto-gates)')
+  .option('--format <fmt>', 'Output format: json|text', 'text')
+  .action((opts: { format?: string }) => {
+    const { retroSweepAlwaysAsk } = require('../bus/always-ask-retro-sweep.js');
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const candidates = retroSweepAlwaysAsk(paths);
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(candidates, null, 2));
+      return;
+    }
+    if (candidates.length === 0) {
+      console.log('No un-gated money-path candidates found.');
+      return;
+    }
+    console.log(`${candidates.length} un-gated money-path candidate(s) — REVIEW and re-create with --category if they should be gated (the rejected/undecided originals are NOT auto-modified):`);
+    for (const c of candidates as Array<{ taskId: string; title: string; status: string; suggestedCategory: string; signals: string[]; createdBy: string }>) {
+      console.log(`  ${c.taskId}  [${c.status}]  by ${c.createdBy}`);
+      console.log(`    "${c.title}"`);
+      console.log(`    signal: ${c.signals.join(', ')}  ->  suggests --category ${c.suggestedCategory}  (HINT ONLY — a human decides)`);
+    }
+  });
+
 // list-approvals — was missing from CLI, only available via dashboard
 // ---------------------------------------------------------------------------
 

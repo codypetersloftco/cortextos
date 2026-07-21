@@ -298,7 +298,7 @@ export function updateApproval(
     // to `pending` so the owner can see it and cancel/rework; it does not
     // auto-cancel (that is the owner's call, not the gate's).
     if (approval.task_id) {
-      unblockTaskForApproval(paths, approval.task_id, approvalId);
+      releaseTaskForApproval(paths, approval.task_id, approvalId, status);
     }
   } catch (err) {
     throw new Error(`Approval ${approvalId} not found: ${err}`);
@@ -309,16 +309,28 @@ export function updateApproval(
  * Release a task that an always_ask approval was gating (G1). Done inline with
  * fs (not via bus/task.ts) so approval.ts does NOT import task.ts — task.ts
  * imports createApprovalObject from here, and a mutual import would be a cycle.
- * Only flips a task that is actually `blocked` on THIS approval; anything else
- * (already progressed, different approval, missing file) is left untouched.
+ * Only touches a task that is actually `blocked` on THIS approval; anything
+ * else (already progressed, different approval, missing file) is left alone.
+ *
+ * APPROVED  -> 'pending'   (the gate is satisfied; the task becomes executable).
+ * REJECTED  -> 'cancelled' (TERMINAL, non-executable). A rejection must PREVENT
+ *   the action — returning a rejected money-path task to 'pending' would make
+ *   it executable again and defeat the gate exactly when it matters most. The
+ *   rejected approval stays in resolved/ for audit; owner rework = create a NEW
+ *   task, which re-gates. (boss 1784652695327)
  */
-function unblockTaskForApproval(paths: BusPaths, taskId: string, approvalId: string): void {
+function releaseTaskForApproval(
+  paths: BusPaths,
+  taskId: string,
+  approvalId: string,
+  decision: ApprovalStatus,
+): void {
   const filePath = join(paths.taskDir, `${taskId}.json`);
   if (!existsSync(filePath)) return; // task gone — nothing to release
   try {
     const task: Task = JSON.parse(readFileSync(filePath, 'utf-8'));
     if (task.status !== 'blocked' || task.approval_id !== approvalId) return;
-    task.status = 'pending';
+    task.status = decision === 'approved' ? 'pending' : 'cancelled';
     task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     atomicWriteSync(filePath, JSON.stringify(task));
   } catch {
