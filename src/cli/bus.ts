@@ -1311,16 +1311,25 @@ busCommand
     console.log(id);
   });
 
+// Single source of truth for the resolutions `update-approval` accepts. The help
+// text, the validator and the error message all derive from it — they had drifted
+// apart once already: the help said "approved or denied" while the validator
+// accepted `rejected`, so anyone following the documented value got a hard
+// process.exit(1). `denied` is not an ApprovalStatus and appears nowhere else in
+// the codebase; the help string was the only place the wrong word existed.
+const RESOLVABLE_APPROVAL_STATUSES: ApprovalStatus[] = ['approved', 'rejected'];
+
 busCommand
   .command('update-approval')
   .description('Resolve an approval request')
   .argument('<id>', 'Approval ID')
-  .argument('<status>', 'Resolution: approved or denied')
+  .argument('<status>', `Resolution: ${RESOLVABLE_APPROVAL_STATUSES.join(' or ')}`)
   .argument('[note]', 'Resolution note')
   .action((id: string, status: string, note?: string) => {
-    const validStatuses: ApprovalStatus[] = ['approved', 'rejected'];
-    if (!validStatuses.includes(status as ApprovalStatus)) {
-      console.error(`Invalid status '${status}'. Must be one of: approved, rejected`);
+    if (!RESOLVABLE_APPROVAL_STATUSES.includes(status as ApprovalStatus)) {
+      console.error(
+        `Invalid status '${status}'. Must be one of: ${RESOLVABLE_APPROVAL_STATUSES.join(', ')}`
+      );
       process.exit(1);
     }
     const env = resolveEnv();
