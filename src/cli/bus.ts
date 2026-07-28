@@ -488,17 +488,38 @@ busCommand
     const STATUS_ICON: Record<string, string> = { pending: '○', in_progress: '●', blocked: '◑', completed: '✓', done: '✓', cancelled: '✗' };
 
     console.log(`\n  Tasks (${tasks.length})\n`);
-    const header = '  Status  Pri  ID                        Assignee         Title';
+
+    // NEVER TRUNCATE AN IDENTIFIER. The previous `substring(0, 26).padEnd(26)`
+    // was one character short of the 27-char task id format, so it silently
+    // dropped the last character AND consumed the column gap — every row read
+    // as `task_1779217431944_5327315engineer`. An id copied from that display
+    // does not resolve, and a "task not found" is indistinguishable from a task
+    // that was never created. Widths are derived from the DATA so a future id
+    // format cannot silently re-introduce the same defect.
+    const widthOf = (values: string[], min: number) =>
+      values.reduce((w, v) => Math.max(w, v.length), min) + 2;
+    const idWidth = widthOf(tasks.map((t) => t.id), 'ID'.length);
+    const assigneeWidth = widthOf(
+      tasks.map((t) => t.assigned_to || '-'),
+      'Assignee'.length
+    );
+
+    const header =
+      '  Status  Pri  ' + 'ID'.padEnd(idWidth) + 'Assignee'.padEnd(assigneeWidth) + 'Title';
     const separator = '  ' + '-'.repeat(header.length - 2);
     console.log(header);
     console.log(separator);
 
+    const TITLE_MAX = 50;
     for (const t of tasks) {
       const statusIcon = (STATUS_ICON[t.status] || '?').padEnd(8);
       const priIcon = (PRIORITY_ICON[t.priority] || '·').padEnd(5);
-      const id = t.id.substring(0, 26).padEnd(26);
-      const assignee = (t.assigned_to || '-').substring(0, 16).padEnd(17);
-      const title = t.title.substring(0, 50);
+      const id = t.id.padEnd(idWidth);
+      const assignee = (t.assigned_to || '-').padEnd(assigneeWidth);
+      // Titles are descriptive, not load-bearing, so they may be shortened —
+      // but the ellipsis makes the shortening VISIBLE rather than silent.
+      const title =
+        t.title.length > TITLE_MAX ? t.title.substring(0, TITLE_MAX - 1) + '…' : t.title;
       console.log(`  ${statusIcon}${priIcon}${id}${assignee}${title}`);
     }
     console.log('');
