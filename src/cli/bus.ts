@@ -1966,13 +1966,20 @@ busCommand
 
     if (opts.format === 'text') {
       if (approvals.length === 0) { console.log('No pending approvals'); return; }
-      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string }>) {
+      for (const a of approvals as Array<{ id: string; title: string; category: string; requesting_agent: string; created_at: string; description?: string; org?: string; orphaned_by_cancelled_task?: boolean }>) {
         console.log(`[${a.id}] ${a.title}`);
         console.log(`  Category: ${a.category} | Agent: ${a.requesting_agent} | Org: ${a.org ?? env.org} | Created: ${a.created_at}`);
         if (a.description) console.log(`  Context: ${a.description}`);
+        // A moot row costs a reader the same attention as a live one, so say so HERE —
+        // the flag existing in the JSON does nothing for the person reading this list.
+        if (a.orphaned_by_cancelled_task) {
+          console.log(`  ⚠ MOOT: the task this gates was CANCELLED. Still pending — only you can retire it.`);
+        }
         console.log('');
       }
-      console.log(`Total: ${approvals.length} pending`);
+      const orphaned = (approvals as Array<{ orphaned_by_cancelled_task?: boolean }>)
+        .filter(a => a.orphaned_by_cancelled_task).length;
+      console.log(`Total: ${approvals.length} pending${orphaned ? ` (${orphaned} moot — linked task already cancelled)` : ''}`);
     } else {
       console.log(JSON.stringify(approvals, null, 2));
     }

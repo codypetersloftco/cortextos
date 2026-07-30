@@ -154,6 +154,16 @@ export interface Approval {
    * unblock the linked task on resolve.
    */
   task_id?: string;
+  /**
+   * READ-SIDE ANNOTATION, NOT PERSISTED STATE. Set by listPendingApprovals when
+   * this approval's linked task has already been cancelled — the approval is
+   * therefore moot but is still pending, because propagation runs one way only
+   * (approval resolved -> task released; task cancelled -> nothing).
+   *
+   * It is deliberately a FLAG rather than an auto-resolve: a superseded approval
+   * is the principal's to retire, not an agent's. Never written to disk.
+   */
+  orphaned_by_cancelled_task?: boolean;
 }
 
 // Agent Config Types (config.json)
