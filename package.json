@@ -7,10 +7,8 @@
     "cortextos": "dist/cli.js"
   },
   "scripts": {
-    "prebuild": "node scripts/prebuild-deploy-notice.mjs",
-    "build": "tsup",
-    "predev": "node scripts/prebuild-deploy-notice.mjs",
-    "dev": "tsup --watch",
+    "build": "node scripts/prebuild-deploy-notice.mjs && tsup",
+    "dev": "node scripts/prebuild-deploy-notice.mjs && tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:codex": "vitest run tests/e2e/lifecycle-codex.test.ts tests/integration/multi-agent-crons-codex.test.ts tests/integration/codex-bus-roundtrip.test.ts tests/integration/codex-handoff-lifecycle.test.ts tests/integration/fleet-health-mixed-codex-claude.test.ts dashboard/src/lib/__tests__/cost-parser-codex.test.ts",

@@ -34,6 +34,21 @@
  *    about a deploy path is worse than no claim.
  * 4. VERIFY THE SNAPSHOT IT TAKES. A recovery artifact nobody has checked is indistinguishable
  *    from one that works: count the files and checksum the entry point, and print both.
+ *
+ * ⛔ DO NOT CONVERT THIS BACK TO AN npm "prebuild" LIFECYCLE HOOK.
+ * ---------------------------------------------------------------
+ * It was wired that way first, and it SILENTLY NEVER RAN: `~/.npmrc` on this machine sets
+ * `ignore-scripts=true`, which suppresses pre/post lifecycle scripts while still running the
+ * script you explicitly invoke. So `npm run build` executed tsup and skipped `prebuild`
+ * without a word — no warning, no error, output identical to a machine with no hook at all.
+ *
+ * That setting is a deliberate supply-chain defence (it blocks dependencies' install scripts)
+ * and must NOT be turned off to make this work: re-enabling third-party postinstall execution
+ * across every project on the machine is a far worse trade than the hazard handled here.
+ *
+ * So the guard is chained INSIDE `build` itself (`node this && tsup`) rather than hung off a
+ * lifecycle event. It then runs as part of the command npm was asked to run, which no npm
+ * config can skip. A guard that depends on configuration it does not control is not a guard.
  */
 import { execFileSync } from 'node:child_process';
 import {
