@@ -20,6 +20,7 @@ import type { CronDefinition, CronExecutionLogEntry } from '../types/index.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME, cronExecutionLogPathFor } from './crons-schema.js';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { withFileLockSync } from '../utils/lock.js';
+import { redactSecrets } from '../utils/redact.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -204,11 +205,48 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
 }
 
 /**
+ * Warn when a cron prompt embeds a credential.
+ *
+ * ⚠ THIS LIVES AT THE WRITE LAYER, NOT THE CLI LAYER, AND THAT IS THE WHOLE POINT.
+ * It was first written in `cli/bus.ts` beside the `add-cron` command — which guarded exactly one
+ * of three doors. `addCron`/`updateCron` are also called by `daemon/ipc-server.ts` (the dashboard
+ * and any agent creating a cron over IPC) and by `daemon/cron-migration.ts`. A check on the CLI
+ * command is invisible to both.
+ *
+ * ⇒ And migration is the WORST case, not an edge case: `cron-migration` exists to import
+ * PRE-EXISTING prompts out of config.json — the ones most likely to carry an embedded secret,
+ * because they were written before anyone thought about this.
+ *
+ * A cron prompt has two leak paths and only one is fixable in code:
+ *   DISPLAY  (`list-crons`)  — masked, see utils/redact.ts. Its consumer is a READER.
+ *   DISPATCH (fired prompt)  — CANNOT be masked. Its consumer is an EXECUTOR, so any redaction
+ *                              that preserves executability preserves the secret. It writes the
+ *                              value into a session transcript on a SCHEDULE, unprompted.
+ * Measured on this fleet: of 588 credential lines across two stdout logs, 570 classified as
+ * dispatch and ZERO as display. The display fix is prophylactic; this is where the volume is.
+ *
+ * ⚠ WARNS, NEVER BLOCKS — deliberately. A hard gate here would push people to edit crons.json
+ * directly, and that path has no warning at all: a block would move traffic to the unguarded door.
+ */
+function warnIfPromptCarriesSecret(prompt: string | undefined, cronName: string): void {
+  if (!prompt || redactSecrets(prompt) === prompt) return;
+  console.warn(
+    `\n⚠  cron '${cronName}': the prompt appears to embed a CREDENTIAL.\n` +
+    `   A cron prompt is dispatched into an agent session verbatim on every fire, so the value\n` +
+    `   lands in that session's transcript and logs on a SCHEDULE — and those are append-only.\n` +
+    `   list-crons output is masked, but DISPATCH CANNOT BE: the prompt has to run.\n` +
+    `   ⇒ Read the secret from the environment or a secrets file inside the script instead, so\n` +
+    `     the command string never carries it. Proceeding anyway.\n`
+  );
+}
+
+/**
  * Add a new cron definition for an agent.
  *
  * @throws {Error} if a cron with the same name already exists for the agent.
  */
 export function addCron(agentName: string, cron: CronDefinition): void {
+  warnIfPromptCarriesSecret(cron.prompt, cron.name);
   withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const collision = existing.find(c => c.name === cron.name);
@@ -252,6 +290,11 @@ export function updateCron(
   name: string,
   patch: Partial<CronDefinition>
 ): boolean {
+  // A prompt can be EDITED into carrying a secret, so a creation-only guard misses every one of
+  // those. Only checked when the patch actually touches `prompt` — the scheduler calls this on
+  // every fire to stamp last_fire_attempted_at, and re-warning on those would make the warning
+  // routine, which is how a real one stops being read.
+  if (patch.prompt !== undefined) warnIfPromptCarriesSecret(patch.prompt, name);
   return withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const idx = existing.findIndex(c => c.name === name);
