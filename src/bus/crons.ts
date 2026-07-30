@@ -196,6 +196,7 @@ export function readCrons(agentName: string): CronDefinition[] {
  * automatic recovery in `readCrons()` on parse failure.
  */
 export function writeCrons(agentName: string, crons: CronDefinition[]): void {
+  warnOnNewEmbeddedCredentials(agentName, crons);
   const filePath = cronsFilePath(agentName);
   const envelope: CronsFile = {
     updated_at: new Date().toISOString(),
@@ -205,13 +206,17 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
 }
 
 /**
- * Warn when a cron prompt embeds a credential.
+ * Warn when a cron prompt embeds a credential — ON THE WRITER, and only for prompts that are
+ * NEW OR CHANGED relative to what is already on disk.
  *
- * ⚠ THIS LIVES AT THE WRITE LAYER, NOT THE CLI LAYER, AND THAT IS THE WHOLE POINT.
- * It was first written in `cli/bus.ts` beside the `add-cron` command — which guarded exactly one
- * of three doors. `addCron`/`updateCron` are also called by `daemon/ipc-server.ts` (the dashboard
- * and any agent creating a cron over IPC) and by `daemon/cron-migration.ts`. A check on the CLI
- * command is invisible to both.
+ * ⚠ IT TOOK THREE PLACEMENTS TO FIND THE RIGHT LAYER, AND EACH WRONG ONE LOOKED COMPLETE:
+ *   1. `cli/bus.ts` beside `add-cron`   — missed the dashboard/IPC and migration entirely.
+ *   2. `addCron` / `updateCron`         — missed migration, which imports `writeCrons` DIRECTLY
+ *                                          (cron-migration.ts:378) and never touches either.
+ *   3. `writeCrons` — the actual bottom. addCron/updateCron/removeCron all delegate here, so one
+ *      check covers every caller with no double-warn.
+ * ⇒ Each time, the missing caller was one level below where the reasoning stopped. That is the
+ * default failure of reading a call graph top-down: you guard the layer you are looking at.
  *
  * ⇒ And migration is the WORST case, not an edge case: `cron-migration` exists to import
  * PRE-EXISTING prompts out of config.json — the ones most likely to carry an embedded secret,
@@ -228,16 +233,34 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
  * ⚠ WARNS, NEVER BLOCKS — deliberately. A hard gate here would push people to edit crons.json
  * directly, and that path has no warning at all: a block would move traffic to the unguarded door.
  */
-function warnIfPromptCarriesSecret(prompt: string | undefined, cronName: string): void {
-  if (!prompt || redactSecrets(prompt) === prompt) return;
-  console.warn(
-    `\n⚠  cron '${cronName}': the prompt appears to embed a CREDENTIAL.\n` +
-    `   A cron prompt is dispatched into an agent session verbatim on every fire, so the value\n` +
-    `   lands in that session's transcript and logs on a SCHEDULE — and those are append-only.\n` +
-    `   list-crons output is masked, but DISPATCH CANNOT BE: the prompt has to run.\n` +
-    `   ⇒ Read the secret from the environment or a secrets file inside the script instead, so\n` +
-    `     the command string never carries it. Proceeding anyway.\n`
-  );
+function warnOnNewEmbeddedCredentials(agentName: string, next: CronDefinition[]): void {
+  // NEW-OR-CHANGED ONLY. writeCrons runs on EVERY write, including the scheduler stamping
+  // last_fire_attempted_at ~6x/day per cron. Warning unconditionally would re-fire on every one
+  // of those and make the warning routine — which is exactly how a real warning stops being read.
+  // Diffing against disk is what lets the check sit on the writer without becoming noise.
+  let priorByName: Map<string, string | undefined>;
+  try {
+    priorByName = new Map(readCrons(agentName).map(c => [c.name, c.prompt]));
+  } catch {
+    // Unreadable prior state is not a reason to skip the check — fall back to treating every
+    // prompt as new. Over-warning once is strictly better than a silent miss on a fresh file.
+    priorByName = new Map();
+  }
+
+  for (const cron of next) {
+    const prompt = cron.prompt;
+    if (!prompt) continue;
+    if (priorByName.has(cron.name) && priorByName.get(cron.name) === prompt) continue;
+    if (redactSecrets(prompt) === prompt) continue;
+    console.warn(
+      `\n⚠  cron '${cron.name}': the prompt appears to embed a CREDENTIAL.\n` +
+      `   A cron prompt is dispatched into an agent session verbatim on every fire, so the value\n` +
+      `   lands in that session's transcript and logs on a SCHEDULE — and those are append-only.\n` +
+      `   list-crons output is masked, but DISPATCH CANNOT BE: the prompt has to run.\n` +
+      `   ⇒ Read the secret from the environment or a secrets file inside the script instead, so\n` +
+      `     the command string never carries it. Proceeding anyway.\n`
+    );
+  }
 }
 
 /**
@@ -246,7 +269,6 @@ function warnIfPromptCarriesSecret(prompt: string | undefined, cronName: string)
  * @throws {Error} if a cron with the same name already exists for the agent.
  */
 export function addCron(agentName: string, cron: CronDefinition): void {
-  warnIfPromptCarriesSecret(cron.prompt, cron.name);
   withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const collision = existing.find(c => c.name === cron.name);
@@ -290,11 +312,6 @@ export function updateCron(
   name: string,
   patch: Partial<CronDefinition>
 ): boolean {
-  // A prompt can be EDITED into carrying a secret, so a creation-only guard misses every one of
-  // those. Only checked when the patch actually touches `prompt` — the scheduler calls this on
-  // every fire to stamp last_fire_attempted_at, and re-warning on those would make the warning
-  // routine, which is how a real one stops being read.
-  if (patch.prompt !== undefined) warnIfPromptCarriesSecret(patch.prompt, name);
   return withFileLockSync(lockDirFor(agentName), () => {
     const existing = readCrons(agentName);
     const idx = existing.findIndex(c => c.name === name);
