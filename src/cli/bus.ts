@@ -2133,6 +2133,33 @@ async function signalCronReload(agentName: string, instanceId: string): Promise<
   } catch { /* non-fatal — scheduler picks up file change on next 30s tick */ }
 }
 
+/**
+ * Warn — loudly, at the moment of creation — when a cron prompt embeds a credential.
+ *
+ * A cron prompt has TWO leak paths and they are not equally fixable:
+ *   DISPLAY  (`list-crons`)  — masked, see utils/redact.ts. Leaks only when someone looks.
+ *   DISPATCH (fired prompt)  — CANNOT be masked. The prompt is an instruction to EXECUTE;
+ *                              redacting it would hand the agent a command that cannot run,
+ *                              which is a correctness bug dressed as a security fix.
+ *
+ * ⇒ Dispatch is the higher-volume path — it writes the secret into an agent session and its
+ * transcript on a SCHEDULE, whether or not anyone runs a command. So the only real fix is to
+ * keep the secret out of the command string in the first place, and the only place that can be
+ * enforced is here, at creation. This does NOT block: it is advice at the point of the decision,
+ * not a gate on an existing workflow.
+ */
+function warnIfPromptCarriesSecret(prompt: string, cronName: string): void {
+  if (redactSecrets(prompt) === prompt) return;
+  console.warn(
+    `\n⚠  cron '${cronName}': the prompt appears to embed a CREDENTIAL.\n` +
+    `   A cron prompt is dispatched into an agent session verbatim on every fire, so the value\n` +
+    `   lands in that session's transcript and logs on a SCHEDULE — and those are append-only.\n` +
+    `   list-crons output is masked, but DISPATCH CANNOT BE: the prompt has to run.\n` +
+    `   ⇒ Read the secret from the environment or a secrets file inside the script instead, so\n` +
+    `     the command string never carries it. Creating the cron anyway.\n`
+  );
+}
+
 busCommand
   .command('add-cron')
   .description('Add a new persistent cron for an agent')
@@ -2158,6 +2185,7 @@ busCommand
     try { schedule = validateSchedule(interval); } catch (err) { console.error(String(err)); process.exit(1); }
 
     const prompt = promptWords.join(' ');
+    warnIfPromptCarriesSecret(prompt, name);
     const cron: CronDefinition = {
       name,
       prompt,
@@ -2314,6 +2342,9 @@ busCommand
       try { patch.schedule = validateSchedule(rawSchedule); } catch (err) { console.error(String(err)); process.exit(1); }
     }
     if (opts.prompt !== undefined) {
+      // Same check as add-cron: a prompt can be EDITED into carrying a secret, and a guard on
+      // creation alone would miss every one of those.
+      warnIfPromptCarriesSecret(opts.prompt, name);
       patch.prompt = opts.prompt;
     }
     if (opts.enabled !== undefined) {

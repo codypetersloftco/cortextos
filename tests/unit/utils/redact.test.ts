@@ -29,6 +29,19 @@ describe('redactSecrets', () => {
     expect(out).toContain('@localhost:5432/ai_admin');
   });
 
+  it('⭐ WRAPPED VALUES: a QUOTED secret must still match', () => {
+    // This is the defect that broke a colleague's scanner twice in one day. He put the quote
+    // characters in his EXCLUSION SET — `PGPASSWORD=([^\s"';]+)` — which assumes the value is
+    // BARE and the quote TERMINATES it. When the value is WRAPPED, the quote is the FIRST
+    // character, the + needs >=1, and the match dies at position 0 returning a silent zero that
+    // is indistinguishable from a clean file. The real cron on this fleet is single-quoted.
+    for (const wrapped of [`PGPASSWORD='${PW}'`, `PGPASSWORD="${PW}"`, `PGPASSWORD=${PW}`]) {
+      const out = redactSecrets(`${wrapped} psql -h localhost`);
+      expect(out, `failed on: ${wrapped.slice(0, 14)}...`).not.toContain(PW);
+      expect(out).toContain(REDACTED);
+    }
+  });
+
   it('masks --password / -p style flags', () => {
     expect(redactSecrets(`mysql -u root --password=${PW}`)).not.toContain(PW);
     expect(redactSecrets(`tool --api-key ${PW}`)).not.toContain(PW);
