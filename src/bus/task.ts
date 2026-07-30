@@ -75,6 +75,21 @@ export function createTask(
   const taskId = `task_${epoch}_${rand}`;
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
+  // With no org, getBusPaths falls back to <ctxRoot>/tasks (see utils/paths.ts). That is a
+  // legitimate destination for genuinely org-less callers, but it is invisible to anyone who
+  // does not know it exists: 51 tasks accumulated there between 2026-07-10 and 07-29, four
+  // still in_progress at up to 378h, and the caller who created them had no way to tell.
+  // findTaskFile/listTasks now reach that root, so these are no longer unmanageable — but a
+  // caller who did not MEAN to be org-less should still find out at creation time rather than
+  // when a dashboard silently omits the task. Name the directory: "no org" is a config
+  // observation, "written to <path>" is something the reader can act on.
+  if (!org) {
+    console.warn(
+      `[task] ${taskId} created with NO org (CTX_ORG unset) -> ${paths.taskDir}. ` +
+      `Org-scoped boards may not display it. Set CTX_ORG if this task belongs to an org.`,
+    );
+  }
+
   // Dependency validation FIRST — a cycle must never be allowed to
   // leave partial state on disk. Earlier iteration wrote the task
   // JSON before detectCycleOrThrow ran, so a failed cycle check left
@@ -265,7 +280,7 @@ export function findTaskFile(paths: BusPaths, taskId: string): string | null {
   const sameOrg = join(paths.taskDir, `${taskId}.json`);
   if (existsSync(sameOrg)) return sameOrg;
 
-  // Fallback: cross-org scan.
+  // Fallback: cross-org scan, PLUS the org-less root.
   const orgsRoot = join(paths.ctxRoot, 'orgs');
   const matches: Array<{ path: string; org: string }> = [];
   try {
@@ -277,7 +292,23 @@ export function findTaskFile(paths: BusPaths, taskId: string): string | null {
       }
     }
   } catch {
-    return null; // orgs/ missing or unreadable
+    // orgs/ missing or unreadable — fall through to the org-less root rather than
+    // returning null. A caller with no orgs/ tree can still own org-less tasks.
+  }
+
+  // A task created with no CTX_ORG lands in <ctxRoot>/tasks (see getBusPaths: orgBase
+  // falls back to ctxRoot when org is undefined). Neither candidate above can reach it,
+  // so an org-scoped caller could never close it — 51 such files accumulated between
+  // 2026-07-10 and 07-29, four still in_progress at up to 378h, invisible to every
+  // dashboard and stale-task sweep.
+  // ⚠ ADDED TO `matches` RATHER THAN RETURNED EARLY, ON PURPOSE: a third root means a
+  // duplicate id across the org-less root and an org would otherwise resolve to whichever
+  // is scanned first, SILENTLY. Feeding it through the same ambiguity branch below keeps a
+  // collision loud. Fixing the resolver is also why we do NOT change orgBase to default to
+  // an org: re-pointing the path builder would strand the existing 51 instead of reaching them.
+  const orgLessRoot = join(paths.ctxRoot, 'tasks', `${taskId}.json`);
+  if (existsSync(orgLessRoot)) {
+    matches.push({ path: orgLessRoot, org: '(org-less root)' });
   }
 
   if (matches.length === 0) return null;
@@ -573,21 +604,38 @@ export function listTasks(
     respectDeps?: boolean;
   },
 ): Task[] {
-  const { taskDir } = paths;
-  let files: string[];
-  try {
-    files = readdirSync(taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
-  } catch {
-    return [];
-  }
-
-  const tasks: Task[] = [];
-  for (const file of files) {
+  // The WRITE verbs have had a cross-root fallback (findTaskFile) since before this change;
+  // the LIST verb did not. That asymmetry is why the org-less tasks were INVISIBLE long before
+  // they were unmanageable: nothing that renders a board ever looked there, so a stuck task
+  // could age 378h without appearing on a dashboard or in check-stale-tasks. Reading both roots
+  // here is what makes the resolver fix observable rather than merely correct.
+  const orgLessDir = join(paths.ctxRoot, 'tasks');
+  const dirs = paths.taskDir === orgLessDir ? [paths.taskDir] : [paths.taskDir, orgLessDir];
+  const files: Array<{ dir: string; name: string }> = [];
+  for (const dir of dirs) {
     try {
-      const content = readFileSync(join(taskDir, file), 'utf-8');
+      for (const f of readdirSync(dir)) {
+        if (f.startsWith('task_') && f.endsWith('.json')) files.push({ dir, name: f });
+      }
+    } catch {
+      // A missing root is normal (an org-scoped instance may have no org-less tasks, and
+      // vice versa). Skipped, never fatal — but NOT silently: an unreadable dir that does
+      // exist is indistinguishable from an empty one here, which is the same fail-open the
+      // resolver bug was made of. Callers that need that distinction use findTaskFile.
+    }
+  }
+  if (files.length === 0) return [];
+
+  const seen = new Set<string>();
+  const tasks: Task[] = [];
+  for (const { dir, name: file } of files) {
+    try {
+      const content = readFileSync(join(dir, file), 'utf-8');
       const task: Task = JSON.parse(content);
+      // Same id in both roots: render it once. findTaskFile warns about the collision on
+      // the write path; the list view must not double-count it into a board total.
+      if (seen.has(task.id)) continue;
+      seen.add(task.id);
 
       // Apply filters
       if (filters?.agent && task.assigned_to !== filters.agent) continue;
