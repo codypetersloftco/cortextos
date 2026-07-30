@@ -379,7 +379,7 @@ Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 **REPLY + ACK DISCIPLINE — non-negotiable:**
 
 1. **Reply** via the exact `Reply using:` command. Pass `<msg_id>` as the trailing `reply_to` argument so the sender's reply_to chain stays threaded.
-2. **Ack** via `cortextos bus ack-inbox <msg_id>` if (and only if) you do NOT reply. Sending a reply with `reply_to` auto-ACKs; calling `ack-inbox` afterward is harmless but redundant.
+2. **Ack** via `cortextos bus ack-inbox <msg_id>` if the message is not already delivered-and-ACK'd. ACK happens on delivery to the recipient — it is not a consequence of replying — so `reply_to` threads the conversation but does not itself ACK anything. Un-ACK'd messages redeliver after 5 min.
 3. Un-ACK'd messages redeliver every 5 minutes. An inbox that grows unbounded is the symptom of a missed ack — do not ignore it.
 
 **Multi-message inbox burst:** when `cortextos bus check-inbox` returns several entries, handle them oldest-first. Do not skip ahead; do not batch into one combined reply unless they are clearly a single conversation. Each `msg_id` needs either a `reply_to` reply or an explicit `ack-inbox`.
