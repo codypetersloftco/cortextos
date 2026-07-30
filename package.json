@@ -7,7 +7,9 @@
     "cortextos": "dist/cli.js"
   },
   "scripts": {
+    "prebuild": "node scripts/prebuild-deploy-notice.mjs",
     "build": "tsup",
+    "predev": "node scripts/prebuild-deploy-notice.mjs",
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",

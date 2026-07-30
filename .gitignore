@@ -61,3 +61,9 @@ dashboard/test-*.py
 # AGENTS.md, memory skill, and scaffold files.
 !community/agents/research-agent/
 !community/agents/research-agent/**
+
+# Auto-written by scripts/prebuild-deploy-notice.mjs on every build. The RESTORE note
+# is regenerated each time, so it is deliberately NOT versioned — its value is being on
+# disk beside the snapshot it describes, and the prebuild output prints its path.
+dist.backup-prebuild-*/
+RESTORE-dist-LATEST.txt
