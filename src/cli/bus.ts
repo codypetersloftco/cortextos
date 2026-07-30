@@ -24,6 +24,7 @@ import { renderMarkdownToHtml, renderMarkdownIndex } from '../bus/render-html.js
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
+import { redactSecrets, redactAndTruncate } from '../utils/redact.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
@@ -2019,7 +2020,7 @@ busCommand
       const overdueTag = overdue ? ' [OVERDUE]' : '';
       console.log(`[${r.id}]${overdueTag}`);
       console.log(`  fire_at: ${r.fire_at}  status: ${r.status}`);
-      console.log(`  prompt:  ${r.prompt}`);
+      console.log(`  prompt:  ${redactSecrets(r.prompt)}`);
       console.log('');
     }
   });
@@ -2224,8 +2225,12 @@ busCommand
     };
 
     if (opts.json) {
+      // --json is an INSPECTION surface, not a round-trip one: crons.json remains the daemon's
+      // source of truth and nothing in src/ re-writes crons from this output. So redact here
+      // too — otherwise the machine-readable path is a bypass around the guard on the table.
       const enriched = crons.map(c => ({
         ...c,
+        prompt: redactSecrets(c.prompt),
         last_fired_at: mostRecent(c.last_fired_at, fireByName.get(c.name)),
       }));
       console.log(JSON.stringify(enriched, null, 2));
@@ -2250,7 +2255,11 @@ busCommand
         const nf = nextFireFromCron(c.schedule, now);
         if (!isNaN(nf)) nextFire = fmtTs(new Date(nf).toISOString());
       }
-      const promptPreview = c.prompt.length > 60 ? c.prompt.slice(0, 57) + '...' : c.prompt;
+      // REDACT THEN TRUNCATE — one call so the order cannot be got wrong. Slicing the raw
+      // prompt first would leave a PREFIX of an inline secret on screen, which looks redacted
+      // and is not. An inline credential is typically an ENV PREFIX (`PGPASSWORD=...`), i.e. it
+      // sits in exactly the first characters this used to print.
+      const promptPreview = redactAndTruncate(c.prompt, 60);
       return {
         name: c.name,
         schedule: c.schedule,
