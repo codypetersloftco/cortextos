@@ -234,10 +234,15 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
  * directly, and that path has no warning at all: a block would move traffic to the unguarded door.
  */
 function warnOnNewEmbeddedCredentials(agentName: string, next: CronDefinition[]): void {
-  // NEW-OR-CHANGED ONLY. writeCrons runs on EVERY write, including the scheduler stamping
-  // last_fire_attempted_at ~6x/day per cron. Warning unconditionally would re-fire on every one
-  // of those and make the warning routine — which is exactly how a real warning stops being read.
-  // Diffing against disk is what lets the check sit on the writer without becoming noise.
+  // NEW-OR-CHANGED ONLY. Two reasons, and the second is the stronger one:
+  //   1. writeCrons runs on EVERY write, including the scheduler stamping last_fire_attempted_at
+  //      ~6x/day per cron. Warning unconditionally re-fires on all of those.
+  //   2. ⭐ writeCrons rewrites the WHOLE ARRAY, so an unconditional check here would re-warn
+  //      about EVERY pre-existing cron whenever anyone touched an UNRELATED one. Pushing a guard
+  //      down a layer multiplies its firing rate by the size of the collection it now sees.
+  // Either way the warning becomes routine, which is exactly how a real one stops being read —
+  // and an annoying guard gets ignored, which is how it dies. Diffing against disk is what lets
+  // the check sit on the writer at all. (Reason 2 is penny's; the code was written for 1 alone.)
   let priorByName: Map<string, string | undefined>;
   try {
     priorByName = new Map(readCrons(agentName).map(c => [c.name, c.prompt]));
