@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Docs correction — `reply_to` does not ACK (behaviour unchanged)
+
+⚠ **If you built a habit on the old wording, it was wrong.** The agent templates and community
+agents said *"Always include `msg_id` as reply_to (auto-ACKs the original)"*. **That parenthetical
+was false, not merely imprecise** — and because agents comply with their instructions, following it
+produced the error: at least one agent observed ACKs it had not caused, concluded threading was
+broken server-side, and escalated that.
+
+- **What is actually true**: `reply_to` is thread metadata. It is rendered into the delivered
+  message for the reader and appears nowhere in the ACK path. **ACK happens on delivery** —
+  `fast-checker` collects every injected inbox message's id and ACKs all of them once the
+  injection succeeds, whether or not any reply is ever sent. Un-ACK'd messages redeliver after
+  5 minutes.
+- **No behaviour changed.** This is a documentation correction only; the daemon has always worked
+  this way.
+- **New wording**: *"Include `msg_id` as reply_to to thread the conversation. ACK happens on
+  delivery to the recipient; un-ACK'd messages redeliver after 5 min."* Two facts, no implied
+  dependency between them.
+- **Files corrected**: `templates/{agent,agent-codex,analyst,orchestrator}` and
+  `community/agents/{agent,analyst,orchestrator,research-agent,security}`. If you copied a
+  template before this entry, check your own `AGENTS.md` / `CLAUDE.md` for the old sentence.
+
 ### Hook Framework — Loop Detection (B1)
 
 - **`hook-loop-detector`**: new PreToolUse hook that detects and blocks repeated Claude tool-call loops. Two patterns are detected: (a) the same tool invoked with identical arguments 15+ times within the last 30 calls, and (b) two tools ping-ponging (24+ alternations within a 12-call dominant-pair window). Blocked calls are NOT recorded into history, so the wedge cannot self-perpetuate. History is time-windowed (60s) so a stale prior-session tail does not block the first call of a new session. After 30 minutes of continuous block, exactly one tool call is allowed through ("emergency escape") so the agent can issue a Telegram alert before re-entering the blocked window.
@@ -90,7 +112,7 @@ File-based inter-agent messaging with strict format parity with the bash referen
 - **Inbox lifecycle**: `send → inbox → inflight (on read) → processed (on ACK)`. Three-directory atomic flow.
 - **Filename convention**: `{pnum}-{epochMs}-from-{sender}-{rand5}.json` where `pnum` encodes priority (0=urgent, 1=high, 2=normal, 3=low) for filesystem-native sort ordering.
 - **Message ID format**: `{epochMs}-{from}-{rand5}` — globally unique, sortable, human-readable.
-- **reply_to field**: Present on every message (null if no reply). Auto-ACKs the original on bus reply.
+- **reply_to field**: Present on every message (null if no reply). Thread metadata only — it is rendered for the reader and takes no part in ACK. ACK happens on delivery: the daemon ACKs every injected inbox message once injection succeeds.
 - **Undelivered redelivery**: Un-ACK'd messages in inflight redeliver after 5 minutes (daemon-level).
 - **Urgent signal**: `notifyAgent()` writes `.urgent-signal` to state dir AND sends a bus message for persistence.
 
