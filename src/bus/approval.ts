@@ -340,12 +340,23 @@ function releaseTaskForApproval(
 }
 
 /**
- * Is this pending approval moot because the task it gates was already cancelled?
+ * Is this pending approval moot because the task it gates already reached a TERMINAL
+ * state? Returns which state, or null.
  *
  * Propagation between the two records runs ONE WAY: resolving an approval releases
- * its task (releaseTaskForApproval above), but cancelling a task does nothing to its
- * approval — so a task cancelled for any reason (superseded, rationale withdrawn,
- * duplicate) leaves a pending approval behind with no way to tell it from a live one.
+ * its task (releaseTaskForApproval above), but a task reaching `cancelled` or
+ * `completed` does nothing to its approval — so it leaves a pending approval behind
+ * with no way to tell it from a live one.
+ *
+ * BOTH terminal states, not just cancelled. The first version of this check looked
+ * only for `cancelled` and walked straight past a live FINANCIAL approval whose task
+ * was `completed` — the oldest item in the queue, asking the principal to decide
+ * something he had already decided himself a day earlier by another route. The claim
+ * the flag makes is identical for both: resolving this will not move the linked task,
+ * because releaseTaskForApproval only touches a `blocked` one.
+ *
+ * The REASON is reported because the two are opposite news: `cancelled` means the
+ * gated action was prevented; `completed` means it already happened.
  *
  * Detected on READ rather than repaired on write, and reported rather than resolved:
  * an agent closing an approval that no human decided is precisely the authority the
@@ -353,23 +364,28 @@ function releaseTaskForApproval(
  * costs a reader the same attention as a real one, and the real ones are payments.
  *
  * Requires the link to hold in BOTH directions, matching the write path's own check.
- * A cancelled task pointing at some other approval says nothing about this one.
+ * A terminal task pointing at some other approval says nothing about this one.
  */
-function isOrphanedByCancelledTask(paths: BusPaths, approval: Approval): boolean {
-  if (!approval.task_id) return false;
+function orphaningTaskState(
+  paths: BusPaths,
+  approval: Approval,
+): 'cancelled' | 'completed' | null {
+  if (!approval.task_id) return null;
   const filePath = join(paths.taskDir, `${approval.task_id}.json`);
-  if (!existsSync(filePath)) return false; // absent is unknown, not decided
+  if (!existsSync(filePath)) return null; // absent is unknown, not decided
   try {
     const task: Task = JSON.parse(readFileSync(filePath, 'utf-8'));
-    return task.status === 'cancelled' && task.approval_id === approval.id;
+    if (task.approval_id !== approval.id) return null;
+    if (task.status === 'cancelled' || task.status === 'completed') return task.status;
+    return null;
   } catch {
-    return false; // corrupt task file must not make a live approval look moot
+    return null; // corrupt task file must not make a live approval look moot
   }
 }
 
 /**
- * List pending approvals, annotating any whose linked task has already been
- * cancelled (see isOrphanedByCancelledTask — flagged, never auto-resolved).
+ * List pending approvals, annotating any whose linked task has already reached a
+ * terminal state (see orphaningTaskState — flagged, never auto-resolved).
  */
 export function listPendingApprovals(paths: BusPaths): Approval[] {
   const pendingDir = join(paths.approvalDir, 'pending');
@@ -385,8 +401,10 @@ export function listPendingApprovals(paths: BusPaths): Approval[] {
     try {
       const content = readFileSync(join(pendingDir, file), 'utf-8');
       const approval: Approval = JSON.parse(content);
-      if (isOrphanedByCancelledTask(paths, approval)) {
+      const orphanedBy = orphaningTaskState(paths, approval);
+      if (orphanedBy) {
         approval.orphaned_by_cancelled_task = true;
+        approval.orphaned_reason = orphanedBy;
       }
       approvals.push(approval);
     } catch {

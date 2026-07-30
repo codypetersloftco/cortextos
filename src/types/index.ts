@@ -164,6 +164,13 @@ export interface Approval {
    * is the principal's to retire, not an agent's. Never written to disk.
    */
   orphaned_by_cancelled_task?: boolean;
+  /**
+   * WHICH terminal state orphaned it. The two mean opposite things to a reader:
+   * `cancelled` = the gated action was PREVENTED. `completed` = it ALREADY
+   * HAPPENED by some other route — which on a money-path row is the more urgent
+   * of the two, not the same news. Read-side only, never persisted.
+   */
+  orphaned_reason?: 'cancelled' | 'completed';
 }
 
 // Agent Config Types (config.json)

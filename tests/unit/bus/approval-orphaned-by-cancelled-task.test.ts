@@ -83,6 +83,36 @@ describe('an approval whose linked task was cancelled is surfaced, not silently 
     expect(flag(a)).toBe(true);
   });
 
+  it('THE GAP: a pending approval whose task is COMPLETED is orphaned too', () => {
+    // Found by applying "can the answer actually be applied?" to the live queue: wc08h, a
+    // financial approval reading as fully live, whose task completed 8h after creation because
+    // the principal had already taken the action himself by another route. The task's own result
+    // says "THE LINKED APPROVAL IS ORPHANED AND STILL PENDING" — and the first version of this
+    // check, shipped 90 minutes earlier, only looked for `cancelled` and walked straight past it.
+    //
+    // The claim the flag makes is narrow and true for BOTH terminal states: resolving this will
+    // not move the linked task, because releaseTaskForApproval only touches a `blocked` one.
+    writeApproval('approval_h', 'task_h');
+    writeTask('task_h', 'completed', 'approval_h');
+
+    const [a] = listPendingApprovals(paths);
+    expect(flag(a)).toBe(true);
+  });
+
+  it('the reason is reported, because cancelled and completed mean opposite things', () => {
+    // CANCELLED: the action was prevented. COMPLETED: the action already happened by some other
+    // route — which is the more urgent one to see on a money-path row, not the same news.
+    writeApproval('approval_i', 'task_i');
+    writeTask('task_i', 'completed', 'approval_i');
+    writeApproval('approval_j', 'task_j');
+    writeTask('task_j', 'cancelled', 'approval_j');
+
+    const byId = Object.fromEntries(listPendingApprovals(paths).map(a => [a.id, a]));
+    const reason = (a: unknown) => (a as { orphaned_reason?: string }).orphaned_reason;
+    expect(reason(byId.approval_i)).toBe('completed');
+    expect(reason(byId.approval_j)).toBe('cancelled');
+  });
+
   it('NEGATIVE CONTROL: a live task leaves its approval unflagged', () => {
     // Without this, flagging everything would pass the test above and destroy the signal.
     writeApproval('approval_b', 'task_b');
