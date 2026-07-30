@@ -463,7 +463,7 @@ cortextos bus test-cron-fire $CTX_AGENT_NAME heartbeat
 ```bash
 cortextos bus list-crons $CTX_AGENT_NAME            # next_fire_at for each
 cortextos bus get-cron-log $CTX_AGENT_NAME          # execution history
-ls "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated"
+ls "${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/.crons-migrated"
 cat "${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/crons.json"
 ```
 

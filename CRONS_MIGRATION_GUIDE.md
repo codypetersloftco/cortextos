@@ -30,7 +30,7 @@ cortextos bus list-crons <agent>
 cortextos bus get-cron-log <agent>
 
 # Marker confirming migration ran (exists = done)
-ls "${CTX_ROOT}/state/{agent}/.crons-migrated"
+ls "${CTX_ROOT}/.cortextOS/state/agents/{agent}/.crons-migrated"
 
 # Populated cron definitions
 cat "${CTX_ROOT}/.cortextOS/state/agents/{agent}/crons.json"
@@ -144,7 +144,7 @@ Two opt-outs prevent false positives on lines that intentionally talk about the 
 - If `updateCron()` fails when persisting `last_fired_at` after a successful fire (e.g. disk full or read-only filesystem), the error is caught and logged to stderr. The in-memory schedule is kept intact and crons continue firing. State (`last_fired_at`, `fire_count`) will not be persisted until the write succeeds, so it may be lost if the daemon restarts before disk space is recovered.
 
 **Need to revert:**
-- Delete `${CTX_ROOT}/.cortextOS/state/agents/{agent}/crons.json` and `${CTX_ROOT}/state/{agent}/.crons-migrated`.
+- Delete `${CTX_ROOT}/.cortextOS/state/agents/{agent}/crons.json` and `${CTX_ROOT}/.cortextOS/state/agents/{agent}/.crons-migrated`.
 - The daemon will re-migrate from `config.json` on next start.
 - Adding crons back via CronCreate is not recommended — session-local crons are unreliable.
 

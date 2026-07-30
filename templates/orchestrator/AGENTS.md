@@ -445,7 +445,7 @@ For ANY work that should survive restarts — morning/evening reviews, fleet mon
 
 ### Migration from config.json
 
-Automatic. On agent boot, the daemon migrates `config.json` crons to `crons.json` once. A marker file `${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated` prevents re-runs. The source `config.json` is left untouched — non-destructive.
+Automatic. On agent boot, the daemon migrates `config.json` crons to `crons.json` once. A marker file `${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/.crons-migrated` prevents re-runs. The source `config.json` is left untouched — non-destructive.
 
 You do not need to do anything. If you want to verify: check that `.crons-migrated` exists and `crons.json` is populated.
 
@@ -482,7 +482,7 @@ cortextos bus list-crons $CTX_AGENT_NAME
 cortextos bus get-cron-log $CTX_AGENT_NAME
 
 # Confirm migration ran
-ls "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.crons-migrated"
+ls "${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/.crons-migrated"
 
 # Inspect crons.json directly
 cat "${CTX_ROOT}/.cortextOS/state/agents/${CTX_AGENT_NAME}/crons.json"
