@@ -67,3 +67,10 @@ dashboard/test-*.py
 # disk beside the snapshot it describes, and the prebuild output prints its path.
 dist.backup-prebuild-*/
 RESTORE-dist-LATEST.txt
+# Internal ops/dev reports — never public (2026-07-01 leak remediation, SEC-1 L4).
+# docs/ is already ignored above; these cover root-level and phase-report globs
+# so a dev artifact cannot re-track outside docs/. Real user docs live elsewhere.
+WINDOWS_INSTALL_REPORT.md
+*INSTALL_REPORT.md
+/PHASE*-REPORT.md
+docs/phase-reports/
